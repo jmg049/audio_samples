@@ -1,48 +1,49 @@
-//! Beat tracking operations for [`AudioSamples`].
+//! Beat tracking on a fixed tempo grid: [`AudioBeatTracking`] and its helpers.
 //!
-//! This module implements the [`AudioBeatTracking`] trait and provides
-//! supporting types ([`BeatTrackingConfig`], [`BeatTrackingData`]) and
-//! lower-level helpers ([`onset_strength_envelope`], [`track_beats_core`])
-//! for tempo-aware beat detection.
-//!
-//! Rhythmic analysis - tempo estimation, beat alignment, and
-//! synchronisation - is central to music production, DJ software, and
-//! audio feature extraction.  Encapsulating the detection pipeline
-//! behind a single trait keeps callers isolated from the onset
-//! detection internals.
-//!
-//! Build a [`BeatTrackingConfig`] with the target tempo and onset
-//! detection parameters, then call [`AudioBeatTracking::detect_beats`]
-//! on any [`AudioSamples`] value.  The lower-level [`track_beats_core`]
-//! function is available when you already have a pre-computed onset
-//! envelope.
-//!
-//! Units: the onset envelope has one value per frame, at a frame rate of
-//! `f_s/H` frames per second (H = `hop_size` samples). A tempo of B beats per
-//! minute is an inter-beat interval of `IBI = 60·f_s/(B·H)` frames, generally
-//! fractional. [`AudioBeatTracking::estimate_tempo`] searches integer
-//! autocorrelation lags L, so its estimates lie on the grid `60·f_s/(H·L)` BPM
-//! and may be off by a factor of 2 (or 3) - an octave error; the log-normal
-//! prior only biases the choice towards 120 BPM. [`track_beats_core`] places
-//! a rigid beat grid with the exact (fractional) IBI anchored at the strongest
-//! onset; it does not adapt to tempo changes (there is no dynamic-programming
-//! beat tracker such as Ellis, 2007).
+//! [`AudioBeatTracking::detect_beats`] places a rigid beat grid at a tempo you
+//! give it, anchored at the strongest onset, and
+//! [`AudioBeatTracking::estimate_tempo`] estimates a tempo by autocorrelation of
+//! the onset envelope. For tempo estimation and dynamic-programming beat
+//! tracking that follows the onsets, use
+//! [`AudioRhythm::beat_track`](crate::AudioRhythm::beat_track) (see
+//! [Choosing between overlapping APIs](crate::operations#choosing-between-overlapping-apis)).
+//! [`track_beats_core`] runs the grid placement on an onset envelope you have
+//! already computed.
 //!
 //! ```
 //! use audio_samples::operations::beat::track_beats_core;
 //! use non_empty_slice::NonEmptyVec;
 //! use std::num::NonZeroUsize;
 //!
-//! let onset = NonEmptyVec::new(vec![0.0f64; 100]).unwrap();
-//! let beats = track_beats_core(
-//!     &onset,
-//!     120.0,
-//!     44100.0,
-//!     NonZeroUsize::new(512).unwrap(),
-//!     None,
-//! ).unwrap();
-//! assert!(!beats.is_empty());
+//! // An onset envelope with a spike every beat at 120 BPM
+//! // (hop 512 at 44.1 kHz: 43.07 frames per beat), starting at frame 10.
+//! let ibi = 60.0 * 44100.0 / (120.0 * 512.0);
+//! let mut env = vec![0.0f64; 300];
+//! for k in 0..7 {
+//!     env[(10.0 + k as f64 * ibi).round() as usize] = 1.0;
+//! }
+//! let onset = NonEmptyVec::new(env).unwrap();
+//!
+//! let beats = track_beats_core(&onset, 120.0, 44100.0, NonZeroUsize::new(512).unwrap(), None)
+//!     .unwrap();
+//! assert_eq!(beats.len(), 7);
+//! assert!((beats[1] - beats[0] - 0.5).abs() < 0.02); // 0.5 s apart
 //! ```
+//!
+//! ## Conventions
+//!
+//! The onset envelope has one value per frame, at `f_s/H` frames per second
+//! (H = `hop_size` samples). A tempo of B beats per minute is an inter-beat
+//! interval of `IBI = 60·f_s/(B·H)` frames, generally fractional.
+//!
+//! ## Limitations
+//!
+//! - [`AudioBeatTracking::estimate_tempo`] searches integer autocorrelation lags
+//!   L, so its estimates lie on the grid `60·f_s/(H·L)` BPM and may be off by a
+//!   factor of 2 (or 3), an octave error. The log-normal prior only biases the
+//!   choice towards 120 BPM.
+//! - [`track_beats_core`] uses the exact (fractional) IBI, so rounding does not
+//!   accumulate, but the grid does not adapt to tempo changes.
 
 use std::num::NonZeroUsize;
 
@@ -438,7 +439,12 @@ fn peak_index(slice: &[f64]) -> usize {
 /// use non_empty_slice::NonEmptyVec;
 /// use std::num::NonZeroUsize;
 ///
-/// let onset = NonEmptyVec::new(vec![0.0f64; 100]).unwrap();
+/// // Spikes 43 frames apart (120 BPM at hop 512, 44.1 kHz).
+/// let mut env = vec![0.0f64; 100];
+/// env[5] = 1.0;
+/// env[48] = 1.0;
+/// env[91] = 1.0;
+/// let onset = NonEmptyVec::new(env).unwrap();
 /// let beats = track_beats_core(
 ///     &onset,
 ///     120.0,
@@ -446,7 +452,7 @@ fn peak_index(slice: &[f64]) -> usize {
 ///     NonZeroUsize::new(512).unwrap(),
 ///     None,
 /// ).unwrap();
-/// assert!(!beats.is_empty());
+/// assert_eq!(beats.len(), 3);
 /// ```
 #[inline]
 pub fn track_beats_core(
