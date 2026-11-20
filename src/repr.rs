@@ -396,21 +396,30 @@ impl SampleType {
         }
     }
 
-    /// Creates a sample type from a number of bits per sample.
+    /// Creates a sample type from a number of bits per sample, or `None` if no
+    /// sample type has that width.
     ///
-    /// # Panics
+    /// 32 bits gives [`SampleType::I32`] and 64 bits [`SampleType::F64`]; a caller
+    /// that knows the samples are 32-bit floats picks [`SampleType::F32`] itself.
     ///
-    /// Panics if the bits value does not correspond to a supported sample type.
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::SampleType;
+    ///
+    /// assert_eq!(SampleType::from_bits(16), Some(SampleType::I16));
+    /// assert_eq!(SampleType::from_bits(12), None);
+    /// ```
     #[inline]
     #[must_use]
-    pub const fn from_bits(bits: u16) -> Self {
+    pub const fn from_bits(bits: u16) -> Option<Self> {
         match bits {
-            8 => Self::U8,
-            16 => Self::I16,
-            24 => Self::I24,
-            32 => Self::I32,
-            64 => Self::F64,
-            _ => panic!("Unsupported bits per sample"),
+            8 => Some(Self::U8),
+            16 => Some(Self::I16),
+            24 => Some(Self::I24),
+            32 => Some(Self::I32),
+            64 => Some(Self::F64),
+            _ => None,
         }
     }
 }

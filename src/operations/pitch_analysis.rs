@@ -231,28 +231,47 @@ pub enum PitchClass {
 }
 
 impl PitchClass {
+    /// The twelve pitch classes in chromatic order, from `C` (index 0) to `B` (index 11).
+    pub const ALL: [Self; 12] = [
+        Self::C,
+        Self::CSharp,
+        Self::D,
+        Self::DSharp,
+        Self::E,
+        Self::F,
+        Self::FSharp,
+        Self::G,
+        Self::GSharp,
+        Self::A,
+        Self::ASharp,
+        Self::B,
+    ];
+
     /// Maps a chromatic index `0..=11` to a pitch class (`0` = C, `11` = B).
     ///
-    /// # Panics
-    /// Panics if `index >= 12`.
+    /// # Errors
+    ///
+    /// Returns [`AudioSampleError::Parameter`] if `index >= 12`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::operations::pitch_analysis::PitchClass;
+    ///
+    /// assert_eq!(PitchClass::from_index(9).unwrap(), PitchClass::A);
+    /// assert!(PitchClass::from_index(12).is_err());
+    /// ```
     #[inline]
-    #[must_use]
-    pub fn from_index(index: u8) -> Self {
-        match index {
-            0 => Self::C,
-            1 => Self::CSharp,
-            2 => Self::D,
-            3 => Self::DSharp,
-            4 => Self::E,
-            5 => Self::F,
-            6 => Self::FSharp,
-            7 => Self::G,
-            8 => Self::GSharp,
-            9 => Self::A,
-            10 => Self::ASharp,
-            11 => Self::B,
-            other => panic!("pitch class index out of range: {other}"),
-        }
+    pub fn from_index(index: u8) -> AudioSampleResult<Self> {
+        Self::ALL.get(usize::from(index)).copied().ok_or_else(|| {
+            AudioSampleError::Parameter(ParameterError::out_of_range(
+                "index",
+                index,
+                0,
+                11,
+                "a pitch class index is 0 (C) to 11 (B)",
+            ))
+        })
     }
 
     /// Returns the chromatic index of this pitch class (`C` = 0, `B` = 11).
@@ -1078,7 +1097,7 @@ where
         let confidence = f64::midpoint(best_correlation, 1.0);
 
         Ok(Key {
-            tonic: PitchClass::from_index(best_key as u8),
+            tonic: PitchClass::ALL[best_key],
             mode: if is_major { Mode::Major } else { Mode::Minor },
             confidence,
         })
@@ -1840,9 +1859,10 @@ mod tests {
     #[test]
     fn key_pitch_class_index_round_trips_and_displays() {
         for idx in 0u8..12 {
-            let pc = PitchClass::from_index(idx);
+            let pc = PitchClass::from_index(idx).unwrap();
             assert_eq!(pc.to_index(), idx);
         }
+        assert!(PitchClass::from_index(12).is_err());
         assert_eq!(PitchClass::C.to_string(), "C");
         assert_eq!(PitchClass::CSharp.to_string(), "C#");
         assert_eq!(PitchClass::B.to_string(), "B");
@@ -1850,7 +1870,7 @@ mod tests {
         // A combined key index: pc = idx % 12, mode = Major if idx < 12 else Minor.
         let major_idx = 4usize; // E major
         assert_eq!(
-            PitchClass::from_index((major_idx % 12) as u8),
+            PitchClass::from_index((major_idx % 12) as u8).unwrap(),
             PitchClass::E
         );
         assert_eq!(
@@ -1864,7 +1884,7 @@ mod tests {
 
         let minor_idx = 21usize; // 21 - 12 = 9 -> A minor
         assert_eq!(
-            PitchClass::from_index((minor_idx % 12) as u8),
+            PitchClass::from_index((minor_idx % 12) as u8).unwrap(),
             PitchClass::A
         );
         assert_eq!(

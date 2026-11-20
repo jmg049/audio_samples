@@ -82,7 +82,7 @@ use ndarray::{
 };
 
 use crate::utils::layout::SliceBins;
-use crate::{AudioFloat, AudioSampleResult, ParameterError};
+use crate::{AudioFloat, AudioSampleError, AudioSampleResult, ParameterError};
 
 /// The smallest positive normal value of `F`, the clipping constant added to
 /// probabilities before taking logs.
@@ -143,9 +143,9 @@ impl DistanceMetric {
     /// For [`DistanceMetric::Cosine`] the result is NaN if either vector has
     /// zero norm.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `u` and `v` have different lengths (programmer error).
+    /// Returns [`AudioSampleError::Parameter`] if `u` and `v` have different lengths.
     ///
     /// # Examples
     ///
@@ -155,15 +155,28 @@ impl DistanceMetric {
     ///
     /// let u = array![0.0, 3.0];
     /// let v = array![4.0, 0.0];
-    /// assert_eq!(DistanceMetric::Euclidean.distance(u.view(), v.view()), 5.0);
-    /// assert_eq!(DistanceMetric::Cityblock.distance(u.view(), v.view()), 7.0);
-    /// assert_eq!(DistanceMetric::Chebyshev.distance(u.view(), v.view()), 4.0);
+    /// assert_eq!(DistanceMetric::Euclidean.distance(u.view(), v.view()).unwrap(), 5.0);
+    /// assert_eq!(DistanceMetric::Cityblock.distance(u.view(), v.view()).unwrap(), 7.0);
+    /// assert_eq!(DistanceMetric::Chebyshev.distance(u.view(), v.view()).unwrap(), 4.0);
+    /// assert!(DistanceMetric::Euclidean.distance(u.view(), array![1.0].view()).is_err());
     /// ```
-    #[must_use]
-    pub fn distance<F: AudioFloat>(self, u: ArrayView1<F>, v: ArrayView1<F>) -> F {
-        assert_eq!(u.len(), v.len(), "vectors must have equal length");
+    pub fn distance<F: AudioFloat>(
+        self,
+        u: ArrayView1<F>,
+        v: ArrayView1<F>,
+    ) -> AudioSampleResult<F> {
+        if u.len() != v.len() {
+            return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+                "v",
+                format!(
+                    "the vectors must have equal length, got {} and {}",
+                    u.len(),
+                    v.len()
+                ),
+            )));
+        }
         let zero = F::zero();
-        match self {
+        Ok(match self {
             Self::Euclidean => Zip::from(&u)
                 .and(&v)
                 .fold(zero, |acc, &a, &b| acc + (a - b) * (a - b))
@@ -186,7 +199,7 @@ impl DistanceMetric {
                 });
                 F::one() - dot / (nu.sqrt() * nv.sqrt())
             }
-        }
+        })
     }
 }
 
@@ -4525,7 +4538,7 @@ mod tests {
                 let mut out = Array2::zeros((x.ncols(), y.ncols()));
                 for (i, xi) in x.columns().into_iter().enumerate() {
                     for (j, yj) in y.columns().into_iter().enumerate() {
-                        out[[i, j]] = cfg.metric.distance(xi, yj);
+                        out[[i, j]] = cfg.metric.distance(xi, yj).unwrap();
                     }
                 }
                 if cfg.subseq && x.ncols() > y.ncols() {
