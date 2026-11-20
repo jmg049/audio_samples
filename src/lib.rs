@@ -630,8 +630,8 @@
 //!
 //! ### Performance
 //!
-//! Constructors can borrow existing buffers, and channel and frame access returns
-//! views, so reading audio rarely copies it. Analysis of 8-, 16- and 24-bit audio
+//! Constructors can borrow existing buffers, and frame iteration and the array
+//! accessors return views, so reading audio rarely copies it. Analysis of 8-, 16- and 24-bit audio
 //! computes in `f32`, and FFT plans are cached per thread and reused across calls.
 //!
 //! ## Learning and related crates
@@ -667,8 +667,9 @@
     doc = r#" - `librosa_migration` and `moving_from_librosa_rust`: librosa functions"#
 )]
 //!   mapped to their counterparts here, and a worked port of a librosa pipeline.
-//! - [`audio_samples_io`](https://docs.rs/audio_samples_io): read and write WAV
-//!   (including RF64), FLAC and AIFF as `AudioSamples`, whole or streamed.
+//! - [`audio_samples_io`](https://docs.rs/audio_samples_io): read WAV (including
+//!   RF64 and BW64), FLAC and AIFF as `AudioSamples` and write WAV, FLAC and AIFF,
+//!   whole or streamed.
 //! - [`audio_samples_streaming`](https://docs.rs/audio_samples_streaming): chunked
 //!   streaming of `AudioSamples` between files, audio devices and async runtimes.
 //! - [`audio_samples_python`](https://github.com/jmg049/audio_samples_python): the
