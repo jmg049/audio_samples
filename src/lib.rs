@@ -99,9 +99,277 @@
 //!
 //! See `Cargo.toml` for the complete dependency graph.
 //!
+//! ### Modules by feature
+//!
+//! The default build (`bare-bones`) contains [`AudioSamples`], the conversions, the
+//! iterators, [`utils`], [`operations::traits`] and [`operations::types`]. Each feature
+//! below adds the modules listed next to it. A module name is a link when this
+//! documentation was built with its feature, and plain text otherwise. In a checkout
+//! of the repository, `cargo docs` builds and opens the documentation with every
+//! feature that builds offline (an alias defined in `.cargo/config.toml`).
+//!
+//! | Feature | Modules |
+//! |---|---|
+#![cfg_attr(
+    feature = "statistics",
+    doc = r#" | `statistics` | [`operations::statistics`] |"#
+)]
+#![cfg_attr(
+    not(feature = "statistics"),
+    doc = r#" | `statistics` | `operations::statistics` |"#
+)]
+#![cfg_attr(
+    feature = "processing",
+    doc = r#" | `processing` | [`operations::processing`] |"#
+)]
+#![cfg_attr(
+    not(feature = "processing"),
+    doc = r#" | `processing` | `operations::processing` |"#
+)]
+#![cfg_attr(
+    feature = "transforms",
+    doc = r#" | `transforms` | [`operations::transforms`], [`operations::spectrum`], [`operations::filterbanks`] |"#
+)]
+#![cfg_attr(
+    not(feature = "transforms"),
+    doc = r#" | `transforms` | `operations::transforms`, `operations::spectrum`, `operations::filterbanks` |"#
+)]
+#![cfg_attr(
+    all(feature = "transforms", feature = "resampling"),
+    doc = r#" | `transforms` + `resampling` | [`operations::constant_q`] |"#
+)]
+#![cfg_attr(
+    not(all(feature = "transforms", feature = "resampling")),
+    doc = r#" | `transforms` + `resampling` | `operations::constant_q` |"#
+)]
+#![cfg_attr(
+    feature = "editing",
+    doc = r#" | `editing` | [`operations::editing`] |"#
+)]
+#![cfg_attr(
+    not(feature = "editing"),
+    doc = r#" | `editing` | `operations::editing` |"#
+)]
+#![cfg_attr(
+    feature = "channels",
+    doc = r#" | `channels` | [`operations::channels`] |"#
+)]
+#![cfg_attr(
+    not(feature = "channels"),
+    doc = r#" | `channels` | `operations::channels` |"#
+)]
+#![cfg_attr(
+    feature = "dynamic-range",
+    doc = r#" | `dynamic-range` | [`operations::dynamic_range`] |"#
+)]
+#![cfg_attr(
+    not(feature = "dynamic-range"),
+    doc = r#" | `dynamic-range` | `operations::dynamic_range` |"#
+)]
+#![cfg_attr(
+    feature = "envelopes",
+    doc = r#" | `envelopes` | [`operations::envelopes`] |"#
+)]
+#![cfg_attr(
+    not(feature = "envelopes"),
+    doc = r#" | `envelopes` | `operations::envelopes` |"#
+)]
+#![cfg_attr(
+    feature = "iir-filtering",
+    doc = r#" | `iir-filtering` | [`operations::iir_filtering`] |"#
+)]
+#![cfg_attr(
+    not(feature = "iir-filtering"),
+    doc = r#" | `iir-filtering` | `operations::iir_filtering` |"#
+)]
+#![cfg_attr(
+    feature = "parametric-eq",
+    doc = r#" | `parametric-eq` | [`operations::parametric_eq`] |"#
+)]
+#![cfg_attr(
+    not(feature = "parametric-eq"),
+    doc = r#" | `parametric-eq` | `operations::parametric_eq` |"#
+)]
+#![cfg_attr(
+    feature = "peak-picking",
+    doc = r#" | `peak-picking` | [`operations::peak_picking`] |"#
+)]
+#![cfg_attr(
+    not(feature = "peak-picking"),
+    doc = r#" | `peak-picking` | `operations::peak_picking` |"#
+)]
+#![cfg_attr(
+    feature = "onset-detection",
+    doc = r#" | `onset-detection` | [`operations::onset`] |"#
+)]
+#![cfg_attr(
+    not(feature = "onset-detection"),
+    doc = r#" | `onset-detection` | `operations::onset` |"#
+)]
+#![cfg_attr(
+    feature = "beat-tracking",
+    doc = r#" | `beat-tracking` | [`operations::beat`], [`operations::rhythm`] |"#
+)]
+#![cfg_attr(
+    not(feature = "beat-tracking"),
+    doc = r#" | `beat-tracking` | `operations::beat`, `operations::rhythm` |"#
+)]
+#![cfg_attr(
+    feature = "decomposition",
+    doc = r#" | `decomposition` | [`operations::hpss`] |"#
+)]
+#![cfg_attr(
+    not(feature = "decomposition"),
+    doc = r#" | `decomposition` | `operations::hpss` |"#
+)]
+#![cfg_attr(
+    feature = "pitch-analysis",
+    doc = r#" | `pitch-analysis` | [`operations::pitch_analysis`], [`operations::pitch_tracking`] |"#
+)]
+#![cfg_attr(
+    not(feature = "pitch-analysis"),
+    doc = r#" | `pitch-analysis` | `operations::pitch_analysis`, `operations::pitch_tracking` |"#
+)]
+#![cfg_attr(
+    feature = "feature-extraction",
+    doc = r#" | `feature-extraction` | [`operations::features`], [`operations::tonal`] |"#
+)]
+#![cfg_attr(
+    not(feature = "feature-extraction"),
+    doc = r#" | `feature-extraction` | `operations::features`, `operations::tonal` |"#
+)]
+#![cfg_attr(
+    feature = "effects",
+    doc = r#" | `effects` | [`operations::effects`] |"#
+)]
+#![cfg_attr(
+    not(feature = "effects"),
+    doc = r#" | `effects` | `operations::effects` |"#
+)]
+#![cfg_attr(
+    feature = "sequence",
+    doc = r#" | `sequence` | [`operations::sequence`] |"#
+)]
+#![cfg_attr(
+    not(feature = "sequence"),
+    doc = r#" | `sequence` | `operations::sequence` |"#
+)]
+#![cfg_attr(feature = "linalg", doc = r#" | `linalg` | [`operations::linalg`] |"#)]
+#![cfg_attr(
+    not(feature = "linalg"),
+    doc = r#" | `linalg` | `operations::linalg` |"#
+)]
+#![cfg_attr(
+    feature = "feature-inversion",
+    doc = r#" | `feature-inversion` | [`operations::inverse`] |"#
+)]
+#![cfg_attr(
+    not(feature = "feature-inversion"),
+    doc = r#" | `feature-inversion` | `operations::inverse` |"#
+)]
+#![cfg_attr(
+    feature = "factorization",
+    doc = r#" | `factorization` | [`operations::factorization`] |"#
+)]
+#![cfg_attr(
+    not(feature = "factorization"),
+    doc = r#" | `factorization` | `operations::factorization` |"#
+)]
+#![cfg_attr(
+    feature = "pitch-filterbank",
+    doc = r#" | `pitch-filterbank` | [`operations::pitch_filterbank`] |"#
+)]
+#![cfg_attr(
+    not(feature = "pitch-filterbank"),
+    doc = r#" | `pitch-filterbank` | `operations::pitch_filterbank` |"#
+)]
+#![cfg_attr(feature = "mellin", doc = r#" | `mellin` | [`operations::mellin`] |"#)]
+#![cfg_attr(
+    not(feature = "mellin"),
+    doc = r#" | `mellin` | `operations::mellin` |"#
+)]
+#![cfg_attr(
+    feature = "segmentation",
+    doc = r#" | `segmentation` | [`operations::segment`] |"#
+)]
+#![cfg_attr(
+    not(feature = "segmentation"),
+    doc = r#" | `segmentation` | `operations::segment` |"#
+)]
+#![cfg_attr(feature = "vad", doc = r#" | `vad` | [`operations::vad`] |"#)]
+#![cfg_attr(not(feature = "vad"), doc = r#" | `vad` | `operations::vad` |"#)]
+#![cfg_attr(
+    feature = "plotting",
+    doc = r#" | `plotting` | [`operations::plotting`] |"#
+)]
+#![cfg_attr(
+    not(feature = "plotting"),
+    doc = r#" | `plotting` | `operations::plotting` |"#
+)]
+#![cfg_attr(feature = "resampling", doc = r#" | `resampling` | [`resampling`] |"#)]
+#![cfg_attr(
+    not(feature = "resampling"),
+    doc = r#" | `resampling` | `resampling` |"#
+)]
+#![cfg_attr(
+    feature = "psychoacoustic",
+    doc = r#" | `psychoacoustic` | [`codecs`], [`codecs::perceptual`] |"#
+)]
+#![cfg_attr(
+    not(feature = "psychoacoustic"),
+    doc = r#" | `psychoacoustic` | `codecs`, `codecs::perceptual` |"#
+)]
+#![cfg_attr(
+    feature = "opus-codec",
+    doc = r#" | `opus-codec` | [`codecs::opus`] |"#
+)]
+#![cfg_attr(
+    not(feature = "opus-codec"),
+    doc = r#" | `opus-codec` | `codecs::opus` |"#
+)]
+#![cfg_attr(
+    feature = "fixed-size-audio",
+    doc = r#" | `fixed-size-audio` | [`fixed_audio`] |"#
+)]
+#![cfg_attr(
+    not(feature = "fixed-size-audio"),
+    doc = r#" | `fixed-size-audio` | `fixed_audio` |"#
+)]
+#![cfg_attr(
+    feature = "educational",
+    doc = r#" | `educational` | [`educational`] |"#
+)]
+#![cfg_attr(
+    not(feature = "educational"),
+    doc = r#" | `educational` | `educational` |"#
+)]
+#![cfg_attr(
+    all(feature = "educational", feature = "full_no_plotting"),
+    doc = r#" | `educational` + `full_no_plotting` | [`guide`] |"#
+)]
+#![cfg_attr(
+    not(all(feature = "educational", feature = "full_no_plotting")),
+    doc = r#" | `educational` + `full_no_plotting` | `guide` |"#
+)]
+#![cfg_attr(
+    feature = "full_no_plotting",
+    doc = r#" | `full_no_plotting` | [`librosa_migration`], [`moving_from_librosa_rust`] |"#
+)]
+#![cfg_attr(
+    not(feature = "full_no_plotting"),
+    doc = r#" | `full_no_plotting` | `librosa_migration`, `moving_from_librosa_rust` |"#
+)]
+//!
 //! ## Migration guides
 //!
-//! The `librosa_migration` and `moving_from_librosa_rust` modules (built with
+#![cfg_attr(
+    feature = "full_no_plotting",
+    doc = r#" The [`librosa_migration`] and [`moving_from_librosa_rust`] modules (built with"#
+)]
+#![cfg_attr(
+    not(feature = "full_no_plotting"),
+    doc = r#" The `librosa_migration` and `moving_from_librosa_rust` modules (built with"#
+)]
 //! `full_no_plotting` or `full`; also `documentation/LIBROSA_MIGRATION.md` and
 //! `documentation/MOVING_FROM_LIBROSA_RUST.md`) map Python librosa functions to their
 //! counterparts in this crate and list the differences.
