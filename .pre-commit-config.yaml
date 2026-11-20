@@ -3,10 +3,9 @@
 #   pre-commit install            # once per clone
 #   pre-commit run --all-files    # run everything manually
 #
-# The reference hooks guard the golden-reference test suites: any change to the
-# filter code, the fixtures or the fixture generator must keep audio_samples in
-# agreement with SciPy / FFmpeg / DSPFilters / liquid-dsp, and any change to the
-# librosa-compatible analysis code must keep it in agreement with librosa.
+# The reference hooks guard the golden-fixture test suites: any change to the
+# filter code, the analysis code, the fixtures or a fixture generator must keep
+# audio_samples within the stated tolerances of the reference values.
 repos:
   - repo: local
     hooks:
@@ -28,7 +27,7 @@ repos:
         files: ^(src/.*\.rs|tests/.*\.rs|benches/.*\.rs|examples/.*\.rs|build\.rs|build_support/.*\.rs|Cargo\.(toml|lock))$
 
       - id: filter-reference-tests
-        name: filter reference tests (SciPy / FFmpeg / DSPFilters / liquid-dsp fixtures)
+        name: filter reference tests (golden fixtures)
         entry: tests/reference/hooks/check_filters.sh
         language: system
         pass_filenames: false
@@ -41,19 +40,19 @@ repos:
         pass_filenames: false
         files: ^(tests/reference/.*|tests/fixtures/filters/.*)$
 
-      - id: librosa-reference-tests
-        name: librosa reference tests (librosa 1.0 golden fixtures)
-        entry: tests/reference/hooks/check_librosa.sh
+      - id: analysis-reference-tests
+        name: analysis reference tests (golden fixtures)
+        entry: tests/reference/hooks/check_analysis.sh
         language: system
         pass_filenames: false
-        files: ^(src/operations/(spectrum|filterbanks|features|tonal|constant_q|rhythm|effects|pitch_tracking|sequence|transforms|statistics|processing|editing|channels|hpss|pitch_analysis|beat|peak_picking|linalg|inverse|factorization|pitch_filterbank|mellin|segment|iir_design|types|traits|mod|onset/.*)\.rs|src/(resampling|conversions|traits|repr|lib)\.rs|src/utils/(audio_math|array_ops|notation|mod)\.rs|tests/librosa_reference/.*|tests/fixtures/librosa/.*|Cargo\.toml)$
+        files: ^(src/operations/(spectrum|filterbanks|features|tonal|constant_q|rhythm|effects|pitch_tracking|sequence|transforms|statistics|processing|editing|channels|hpss|pitch_analysis|beat|peak_picking|linalg|inverse|factorization|pitch_filterbank|mellin|segment|iir_design|types|traits|mod|onset/.*)\.rs|src/(resampling|conversions|traits|repr|lib)\.rs|src/utils/(audio_math|array_ops|notation|mod)\.rs|tests/analysis_reference/.*|tests/fixtures/analysis/.*|Cargo\.toml)$
 
-      - id: librosa-fixtures-fresh
-        name: librosa fixtures match their generator
-        entry: tests/reference/hooks/check_librosa_fixtures.sh
+      - id: analysis-fixtures-fresh
+        name: analysis fixtures match their generator
+        entry: tests/reference/hooks/check_analysis_fixtures.sh
         language: system
         pass_filenames: false
-        files: ^(tests/reference/librosa/.*|tests/fixtures/librosa/.*)$
+        files: ^(tests/reference/analysis/.*|tests/fixtures/analysis/.*)$
 
       - id: educational-material
         name: learning guide doctests, explain API and tutorial labs

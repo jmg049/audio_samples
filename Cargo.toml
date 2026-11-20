@@ -443,8 +443,8 @@ name = "filter_reference"
 required-features = ["iir-filtering", "parametric-eq", "processing", "channels"]
 
 [[test]]
-name = "librosa_reference"
-path = "tests/librosa_reference/main.rs"
+name = "analysis_reference"
+path = "tests/analysis_reference/main.rs"
 required-features = ["full_no_plotting"]
 
 

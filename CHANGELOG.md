@@ -100,7 +100,7 @@ All notable changes to this project are documented here.
   precision and defaults*). Outputs are `(channels, features, frames)` arrays in
   the input's float type (`f32` for `u8`/`i16`/`I24`/`f32` audio, `f64` for
   `i32`/`f64`), and results are verified against librosa 1.0.0 golden fixtures
-  (`tests/librosa_reference/`). The same work also fixed bugs in existing
+  (`tests/analysis_reference/`). The same work also fixed bugs in existing
   analysis code (YIN, `estimate_key`, autocorrelation, mu-law, the resampler,
   ...; see *Fixed*) and made the default onset peak picker usable (see *Changed*). `documentation/LIBROSA_MIGRATION.md`
   (rendered as the `librosa_migration` module on docs.rs) maps every librosa
@@ -340,9 +340,9 @@ The librosa-compatible API is unreleased, so these are changes to the
   - `sync` / `sync_with` (beat-synchronous aggregation over the last axis; mean, median, max, min,
     sum or a custom reduction).
 - `mu_law_encode(&[f64], mu) -> Vec<i64>` and `mu_law_decode(&[i64], mu) -> Vec<f64>` (`processing` feature, crate root): librosa's default quantised mu-law (`mu_compress`/`mu_expand` with `quantize=True`), bit-exact codes (`[-128, 127]` for mu = 255).
-- librosa 1.0.0 golden-reference suite: generator `tests/reference/librosa/` (a `uv` project
-  pinning librosa, NumPy, SciPy and soxr), fixtures `tests/fixtures/librosa/*.json`, tests
-  `tests/librosa_reference/` (spectrum, features, tonal, constant_q, rhythm, effects, pitch,
+- librosa 1.0.0 golden-reference suite: generator `tests/reference/analysis/` (a `uv` project
+  pinning librosa, NumPy, SciPy and soxr), fixtures `tests/fixtures/analysis/*.json`, tests
+  `tests/analysis_reference/` (spectrum, features, tonal, constant_q, rhythm, effects, pitch,
   sequence, resample / mu-law and the analysis fixes), and `pre-commit` hooks that run them.
   - Constant-Q (`constant_q.json`): the non-resampled top octave matches librosa to round-off;
     decimated octaves agree to 1.25e-4 of the peak for the default CQT and <= 3.5e-4 away from

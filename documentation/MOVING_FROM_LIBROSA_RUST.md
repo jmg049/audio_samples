@@ -182,7 +182,7 @@ assert_eq!(frames.dim(), (4, 4));
 ## Checking a port
 
 Generate reference output from your librosa pipeline with `numpy.save`, read it in a test and compare
-peak-relative, the way `tests/librosa_reference/` does. Use `f64` audio and librosa's
+peak-relative, the way `tests/analysis_reference/` does. Use `f64` audio and librosa's
 `dtype=np.float64` to compare algorithms rather than `f32` round-off. Expect about 1e-15 to 1e-12 for
 step-by-step ports, about 1e-9 where error feeds back through iterations (phase vocoder, Griffin-Lim),
 and about 1e-4 of the peak where soxr is involved (`pitch_shift`, CQT octaves below the top). The

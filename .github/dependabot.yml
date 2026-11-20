@@ -1,4 +1,4 @@
-# tests/reference/librosa is left out: its exact pins are the versions that
+# tests/reference/analysis is left out: its exact pins are the versions that
 # produced the committed golden fixtures.
 version: 2
 updates:

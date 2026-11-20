@@ -616,9 +616,9 @@ A second family of traits reproduces librosa 1.0 so that librosa pipelines can b
 Two golden-fixture suites pin the numerical behaviour to reference implementations:
 
 - `tests/filter_reference.rs`: IIR designs and filtering against SciPy, DSPFilters, liquid-dsp and FFmpeg (fixtures from `tests/reference/generate_filter_fixtures.py`).
-- `tests/librosa_reference/` (one module per area): the librosa-compatible API against librosa 1.0.0. The generator `tests/reference/librosa/generate_librosa_fixtures.py` is a `uv` project pinning librosa, NumPy, SciPy and soxr; it builds deterministic signals (`tests/fixtures/librosa/signals.json`) and writes one fixture per area to `tests/fixtures/librosa/<area>.json`. Every tolerance in the Rust tests carries a comment naming its error source (FFT butterfly order, summation order, the `float32` librosa bases, or the soxr resampler, which is compared by SNR). Discrete outputs (onsets, beats, paths, tempi) must match exactly.
+- `tests/analysis_reference/` (one module per area): the librosa-compatible API against librosa 1.0.0. The generator `tests/reference/analysis/generate_analysis_fixtures.py` is a `uv` project pinning librosa, NumPy, SciPy and soxr; it builds deterministic signals (`tests/fixtures/analysis/signals.json`) and writes one fixture per area to `tests/fixtures/analysis/<area>.json`. Every tolerance in the Rust tests carries a comment naming its error source (FFT butterfly order, summation order, the `float32` librosa bases, or the soxr resampler, which is compared by SNR). Discrete outputs (onsets, beats, paths, tempi) must match exactly.
 
-Run with `cargo test --release --features full_no_plotting --test librosa_reference` (`-- --nocapture` prints the measured errors). `pre-commit` runs the suite when the covered code or fixtures change, and checks the fixtures against the generator when either changes.
+Run with `cargo test --release --features full_no_plotting --test analysis_reference` (`-- --nocapture` prints the measured errors). `pre-commit` runs the suite when the covered code or fixtures change, and checks the fixtures against the generator when either changes.
 
 ### Plotting (./operations/plotting)
 

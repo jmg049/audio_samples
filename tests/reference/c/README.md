@@ -28,8 +28,8 @@ Verification against SciPy:
 ```sh
 cd tests/reference/c
 ~/.local/bin/uv venv .venv && ~/.local/bin/uv pip install --python .venv/bin/python numpy scipy
-.venv/bin/python verify_against_scipy.py          # full grid, about 14k cases, under a minute
-.venv/bin/python verify_against_scipy.py --quick  # smaller grid
+.venv/bin/python verify_harness.py          # full grid, about 14k cases, under a minute
+.venv/bin/python verify_harness.py --quick  # smaller grid
 ```
 
 ## Protocol (stdin to stdout)
