@@ -154,8 +154,8 @@ file (`cargo run --release --example rust_pipeline -- file.wav`).
 
 ## Allocation-free forms
 
-Some functions have forms that write into your buffer or return static data, which is what the
-benchmark's memory rows use where librosa's result comes from NumPy's small-block cache.
+Some functions have forms that write into your buffer or return static data, for code that must
+not allocate in a loop.
 
 ```rust
 use audio_samples::operations::constant_q::{WaveletConfig, wavelet_lengths_into};
@@ -186,7 +186,7 @@ peak-relative, the way `tests/analysis_reference/` does. Use `f64` audio and lib
 `dtype=np.float64` to compare algorithms rather than `f32` round-off. Expect about 1e-15 to 1e-12 for
 step-by-step ports, about 1e-9 where error feeds back through iterations (phase vocoder, Griffin-Lim),
 and about 1e-4 of the peak where soxr is involved (`pitch_shift`, CQT octaves below the top). The
-guide lists what deliberately does not agree.
+guide lists the intentional differences.
 
 ## What is not here
 

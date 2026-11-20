@@ -47,7 +47,7 @@ All notable changes to this project are documented here.
   `rhythm::onset_strength_multi_slices` / `onset_strength_multi_from_db_slices` and
   `sequence::sync_slices` / `sync_slices_with` take `ndarray::Slice`s. `rhythm::metrogram_per_bin`
   is `metrogram(aggregate=None)`. `effects::nn_filter_sparse` takes a compressed sparse column
-  matrix (`SparseRecurrence`, with SciPy's `i32` or `i64` indices), and `nn_filter_with`,
+  matrix (`SparseRecurrence`, with `i32` or `i64` indices), and `nn_filter_with`,
   `nn_filter_sparse_with` and `nn_filter_recurrence_with` any aggregate. `effects::trim_db_with`,
   `split_db_with` and `nonsilent_frames_with` take closures for the reference level and the
   channel combination. Each is checked against librosa 1.0.0 golden fixtures.
@@ -89,7 +89,7 @@ All notable changes to this project are documented here.
   sorted window. `melspectrogram` and `mfcc_frames` project each block of frames rather than
   holding the whole spectrogram. `to_mono` makes one pass over interleaved stereo.
 - **Plotting.** A spectrogram zoomed below 1 kHz is labelled in kHz, the unit of its values.
-- **librosa parity.** A librosa 1.0-compatible API alongside the existing one:
+- **librosa-compatible API.** A librosa 1.0-compatible API alongside the existing one:
   the `AudioSpectrum`, `AudioFeatures`, `AudioTonal`, `AudioConstantQ`,
   `AudioRhythm`, `AudioEffects` and `AudioPitchTracking` traits, the
   `operations::sequence` module and librosa unit conversions in
@@ -100,9 +100,9 @@ All notable changes to this project are documented here.
   precision and defaults*). Outputs are `(channels, features, frames)` arrays in
   the input's float type (`f32` for `u8`/`i16`/`I24`/`f32` audio, `f64` for
   `i32`/`f64`), and results are verified against librosa 1.0.0 golden fixtures
-  (`tests/analysis_reference/`). The same work also fixed bugs in existing
-  analysis code (YIN, `estimate_key`, autocorrelation, mu-law, the resampler,
-  ...; see *Fixed*) and made the default onset peak picker usable (see *Changed*). `documentation/LIBROSA_MIGRATION.md`
+  (`tests/analysis_reference/`). Bugs in existing analysis code are fixed as
+  well (YIN, `estimate_key`, autocorrelation, mu-law, the resampler, ...; see
+  *Fixed*), and the default onset peak picker finds onsets (see *Changed*). `documentation/LIBROSA_MIGRATION.md`
   (rendered as the `librosa_migration` module on docs.rs) maps every librosa
   function to its counterpart and lists every difference.
 
@@ -201,10 +201,10 @@ The librosa-compatible API is unreleased, so these are changes to the
   the spectrogram's hop). `SilenceConfig` has no `Default` (`new(top_db)`; the
   threshold decides how much `trim_db` removes). `ClicksConfig.hop_length` moved
   into `ClickPositions::Frames { frames, hop_length }`.
-- Every other default equals librosa's. The defaults, with the open
-  questions (frame sizes in samples rather than seconds, `n_mels`, the mel
-  scale, chroma and tempogram normalisation, tempo priors, CQT range), is
-  summarised in `documentation/LIBROSA_MIGRATION.md` under *Defaults that
+- Every other default equals librosa's. The defaults, with the choices a user
+  may want to revisit (frame sizes in samples rather than seconds, `n_mels`,
+  the mel scale, chroma and tempogram normalisation, tempo priors, CQT range),
+  are summarised in `documentation/LIBROSA_MIGRATION.md` under *Defaults that
   differ from librosa*.
 
 ### Added
@@ -258,8 +258,8 @@ The librosa-compatible API is unreleased, so these are changes to the
   axes), `db_to_power`, `db_to_amplitude`, `melspectrogram_from_spectrogram`, `mfcc_from_mel_db`
   (DCT types I-III, ortho/unnormalised, lifter), `delta` (Savitzky-Golay, all edge modes) and
   `stack_memory`.
-- `operations::filterbanks` (feature `transforms`): `Window` / `get_window` (SciPy windows,
-  periodic or symmetric), `window_sumsquare`, `window_bandwidth`, and `mel_filterbank` with
+- `operations::filterbanks` (feature `transforms`): `Window` / `get_window` (the standard
+  window families, periodic or symmetric), `window_sumsquare`, `window_bandwidth`, and `mel_filterbank` with
   `MelFilterbankConfig` (Slaney or HTK scale, Slaney / none / Lp normalisation).
 - `utils::audio_math`: `MelScale` with `hz_to_mel_with_scale`, `mel_to_hz_with_scale`,
   `mel_frequencies_with_scale`; librosa-compatible `time_to_samples`, `samples_to_frames`,
@@ -310,8 +310,8 @@ The librosa-compatible API is unreleased, so these are changes to the
 - Free functions in `operations::effects`: `phase_vocoder` / `phase_vocoder_at`
   (librosa 1.0 algorithm), `preemphasis_with_state` / `deemphasis_with_state` (explicit
   `zi` / `zf`), `nonsilent_frames`, `softmask`, `hpss_masks` / `hpss_magnitude` /
-  `hpss_spectrogram` (`librosa.decompose.hpss`: kernel sizes, power, margins, SciPy
-  `reflect` medians), `griffinlim` (fast Griffin-Lim with momentum; deterministic
+  `hpss_spectrogram` (`librosa.decompose.hpss`: kernel sizes, power, margins,
+  `reflect`-mode medians), `griffinlim` (fast Griffin-Lim with momentum; deterministic
   `ZeroPhase` or seeded random init), `nn_filter` / `nn_filter_recurrence`, `lpc`, `clicks`.
 - Config types `PitchShiftConfig`, `SilenceConfig`, `ChannelAggregate`, `HpssMaskConfig`,
   `HarmonicPercussiveConfig`, `GriffinLimConfig`, `GriffinLimInit`, `NnAggregate`,
@@ -343,10 +343,12 @@ The librosa-compatible API is unreleased, so these are changes to the
 - librosa 1.0.0 golden-reference suite: generator `tests/reference/analysis/` (a `uv` project
   pinning librosa, NumPy, SciPy and soxr), fixtures `tests/fixtures/analysis/*.json`, tests
   `tests/analysis_reference/` (spectrum, features, tonal, constant_q, rhythm, effects, pitch,
-  sequence, resample / mu-law and the analysis fixes), and `pre-commit` hooks that run them.
+  sequence, resample / mu-law, autocorrelation, YIN and note names), and `pre-commit` hooks that
+  run them.
   - Constant-Q (`constant_q.json`): the non-resampled top octave matches librosa to round-off;
     decimated octaves agree to 1.25e-4 of the peak for the default CQT and <= 3.5e-4 away from
-    the signal edges in every configuration (soxr vs the crate's resampler); edge-dominated
+    the signal edges in every configuration (librosa resamples with soxr, the crate with its own
+    resampler); edge-dominated
     configurations with deep decimation differ more at the edges (up to 0.28 of the peak for
     `early_downsample`, where librosa itself moves by 0.33 when switched to `res_type="polyphase"`).
   - Rhythm (`rhythm.json`): peak, onset and beat frames and tempi match exactly; envelopes and
@@ -358,22 +360,23 @@ The librosa-compatible API is unreleased, so these are changes to the
 - `IirFilterDesign::sos_coefficients`, `IirFilterDesign::frequency_response`,
   `SosFilter::from_sos_coefficients`, `SosFilter::sos_coefficients` and
   `SosFilter::filtfilt_in_place` (the last two return an error for
-  non-biquad sections): SciPy/MATLAB-layout SOS interchange
-  (`[b0, b1, b2, a0, a1, a2]` rows).
-- `BesselNorm` and `IirFilterDesign::with_bessel_norm` (SciPy's `norm=`
-  `'mag'` (default here), `'phase'` (SciPy's default) and `'delay'`).
+  non-biquad sections): SOS interchange as `[b0, b1, b2, a0, a1, a2]` rows,
+  the common second-order-section layout.
+- `BesselNorm` and `IirFilterDesign::with_bessel_norm`: Bessel filters
+  normalised for magnitude (-3 dB at the cutoff, the default), phase or group
+  delay.
 - `IirFilterDesign::butterworth_bandstop`, `IirFilterDesign::chebyshev_i_band`,
   `EqBand::band_pass`, `EqBand::band_stop`.
 - Golden-reference filter test suite (`tests/filter_reference.rs`): 594 IIR
-  designs checked coefficient-by-coefficient against SciPy and against
-  DSPFilters and liquid-dsp, time-domain checks against `sosfilt` /
-  `sosfiltfilt`, and 512 RBJ biquads checked against the cookbook and FFmpeg.
-  Fixtures are regenerated by `tests/reference/generate_filter_fixtures.py`.
+  designs checked coefficient by coefficient, time-domain checks of causal and
+  zero-phase filtering, and 512 RBJ biquads checked against the Audio EQ
+  Cookbook formulas. Fixtures are regenerated by
+  `tests/reference/generate_filter_fixtures.py`.
 
 - `StreamingResampler` (`resampling` feature): a stateful, chunk-by-chunk resampler for continuous sources (e.g. audio being decoded live and fed to a playback device at a different sample rate). Uses the same delay-free windowed-sinc engine as `resample`/`resample_by_ratio` (no delay, exact total length, output equal to `resample` of the whole input), but keeps its filter state and any leftover input alive across calls instead of requiring the whole clip up front.
 
-- `examples/librosa_bench.rs`: wall-clock benchmark of the librosa-compatible operations (JSON
-  output; the companion librosa script lives outside the repository).
+- `examples/librosa_bench/`: wall-clock benchmark of the librosa-compatible operations (JSON
+  output), driven by the comparison harness in `benches/librosa_compare/`.
 
 - `PeakPickConfig::new()` (same as `Default`).
 
@@ -391,20 +394,20 @@ The librosa-compatible API is unreleased, so these are changes to the
   Butterworth and Chebyshev I high-pass designs were derived from the
   low-pass with `z → -z`, which maps the cutoff `fc` to `fs/2 - fc`: a
   "4th-order 100 Hz high-pass" at 48 kHz attenuated everything by > 120 dB.
-  All families and responses now use one analog-prototype pipeline that is a
-  line-by-line port of SciPy's (`iirfilter` → `*ap` → `lp2*_zpk` →
-  `bilinear_zpk` → `zpk2sos`).
+  All families and responses now use one analog-prototype pipeline: prototype
+  zeros, poles and gain, the low-pass to low/high/band transformation, the
+  bilinear transform, then pairing into second-order sections.
 - **Odd-order Butterworth / Chebyshev I filters had a doubled real pole**,
   i.e. an order-`N` request produced a wrong order-`N+1` filter (-6 dB instead
   of -3 dB at the cutoff).
 - Chebyshev I filters were renormalised to 0 dB at DC (even orders) or the
   band centre, shifting the passband up by the ripple; the passband now
-  ripples between 0 and -`rp` dB exactly as in SciPy/MATLAB. Butterworth /
+  ripples between 0 and -`rp` dB, as the Chebyshev I definition requires. Butterworth /
   Chebyshev II / Bessel band-pass filters were normalised at the un-warped
   geometric centre, leaving a small gain error.
-- `filtfilt` now matches `scipy.signal.sosfiltfilt` exactly (steady-state
-  initial conditions per pass and SciPy's pad length); previously the edges
-  differed by up to ~6e-3.
+- `filtfilt` uses steady-state initial conditions for each pass and pads by
+  `3 · (2·n_sections + 1)` samples (less for first-order sections);
+  previously the edges were off by up to ~6e-3.
 - Bessel prototypes are accurate to f64 precision up to order 24 (the
   Durand-Kerner root finder lost accuracy beyond order ~12).
 - `low_pass_filter`, `high_pass_filter` and `band_pass_filter` were not
@@ -412,14 +415,15 @@ The librosa-compatible API is unreleased, so these are changes to the
   unstable (output → ∞) for cutoffs above ~fs/π (e.g. 20 kHz at 48 kHz); the
   high-pass computed in the sample type, so for integer audio (e.g. 16-bit WAV)
   its coefficient truncated to zero and it output silence. They are now
-  first-order Butterworth filters (`scipy.signal.butter(1, …)`), and
-  `band_pass_filter` is `butter(1, [low, high], 'bandpass')`.
+  first-order Butterworth filters, and `band_pass_filter` is a first-order
+  Butterworth band-pass between its two edges.
 - RBJ low/high shelf EQ bands used `sqrt(2A)·α` instead of the cookbook's
   `2·sqrt(A)·α`, effectively scaling Q by √2 (up to ~0.8 dB error).
 - `apply_filter` (FIR) computed a correlation rather than a convolution, so
-  asymmetric kernels were applied time-reversed. It now equals
-  `numpy.convolve(x, h, 'valid')`, accumulates in `f64`, and no longer
-  overflows for integer samples.
+  asymmetric kernels were applied time-reversed. It now computes the
+  convolution over the positions where the kernel lies wholly inside the
+  signal ("valid" mode), accumulates in `f64`, and no longer overflows for
+  integer samples.
 - EQ band validation rejects NaN frequency / Q / gain.
 - Numerically degenerate IIR specifications (e.g. a ripple so small that
   `10^(rp/10) - 1` underflows) return a `Parameter` error instead of
@@ -436,14 +440,14 @@ The librosa-compatible API is unreleased, so these are changes to the
 - YIN (`detect_pitch_yin`, `track_pitch` with `PitchDetectionMethod::Yin`, `yin_pitch_detection`): the cumulative-mean normalised difference now includes every lag from 1 (lags below the `max_frequency` limit were zero, inflating the CMND); the first sub-threshold dip is followed to its local minimum (a ±5-lag window stopped on the flank of low-pitch dips, up to +53 cents at 82 Hz); and the period is refined by parabolic interpolation (it was an integer: 440 Hz read as 441 Hz). Errors on a 110-880 Hz glide drop from 8-17 cents median / 32-72 max to 0.8-2.7 / 2.4-4.8 cents.
 - `estimate_key` rotated the key profiles the wrong way, reporting every non-C key as its mirror image (D major as A# major).
 - `frequency_to_note` labelled every frequency below ~7.9 Hz as "C-1" (saturating cast); it now returns `ParameterError::OutOfRange` outside MIDI `0..=127`, as above G9.
-- `AudioStatistics::autocorrelation` divided by the FFT size twice, so values were too small by the zero-padded FFT length; it now returns the documented unbiased estimate (`r[k] * (n - k)` equals `librosa.autocorrelate`).
+- `AudioStatistics::autocorrelation` divided by the FFT size twice, so values were too small by the zero-padded FFT length; it now returns the documented unbiased estimate (`r[k] * (n - k)` is the raw lag sum `Σ x[j] x[j+k]`).
 - `complex_onset_detection` / `onset_detection_function_complex` panicked (`unreachable!`) for every preset on any input long enough for two CQT frames.
 - `spectral_centroid`, `spectral_rolloff`, `spectral_bandwidth` and `spectral_slope` used a wrong frequency axis for odd-length signals (bin spacing sr/(n±1) instead of sr/n).
 - `zero_crossing_rate` on multichannel audio summed the crossings of all channels but divided by one channel's duration (two identical channels gave twice the mono rate); it is now the mean of the per-channel rates.
 - Opus codec: `levinson_durbin` returned the order p-1 LPC solution padded with a stale coefficient instead of the order-p solution.
-- `mu_compress` used `ln(mu|x| + ln(1+mu))` instead of `ln(1 + mu|x|)` (0 mapped to 0.309, ±1 to ±1.003); it now equals `librosa.mu_compress(quantize=False)`. `mu_compress`/`mu_expand` on integer sample types rescaled `mu` like a sample (255 became 255/32768); the raw numeric value is now used. Both reject non-finite or non-positive `mu`.
+- `mu_compress` used `ln(mu|x| + ln(1+mu))` instead of `ln(1 + mu|x|)` (0 mapped to 0.309, ±1 to ±1.003); it now computes `sign(x) ln(1 + mu|x|) / ln(1 + mu)`. `mu_compress`/`mu_expand` on integer sample types rescaled `mu` like a sample (255 became 255/32768); the raw numeric value is now used. Both reject non-finite or non-positive `mu`.
 - `trim_all_silence` discarded the audio before every silent gap shorter than the minimum (a 1 s tone came back as 24 samples); it now removes exactly the silent runs at least `min_silence_duration_seconds` long.
-- Resampling (`resample`, `resample_by_ratio`, `AudioProcessing::resample*`): Medium/High output was delayed by the filter delay (64/128 input samples) and lost the tail; `Fast` downsampling was plain decimation with no anti-aliasing. All sinc paths now use a delay-free Kaiser-windowed sinc interpolator at exact rational positions (f64), with exact output length `ceil(n * out / in)`; `High` follows soxr_hq's passband/attenuation (agrees with `librosa.resample` to 129-135 dB on band-limited content). `Fast` downsampling is anti-aliased; `Fast` upsampling is unchanged (linear interpolation).
+- Resampling (`resample`, `resample_by_ratio`, `AudioProcessing::resample*`): Medium/High output was delayed by the filter delay (64/128 input samples) and lost the tail; `Fast` downsampling was plain decimation with no anti-aliasing. All sinc paths now use a delay-free Kaiser-windowed sinc interpolator at exact rational positions (f64), with exact output length `ceil(n * out / in)`; `High` has a passband to 0.913 of the lower Nyquist frequency and 125 dB stopband attenuation. `Fast` downsampling is anti-aliased; `Fast` upsampling is unchanged (linear interpolation).
 - `to_mono(Average)` averaged stereo f64/i32 in f32 (precision loss) and summed >2 integer channels in the sample type (overflow); `to_stereo(Left/Right)` on **mono** input returned mono / errored; it now gives `[m, 0]` / `[0, m]`. On multi-channel input `Left`/`Right` still extract channel 0 / 1 as a mono signal, exactly as in 2.0 (unchanged; use `extract_channel` for clarity).
 - Pitch-shift perturbation (`PerturbationMethod::PitchShift`): wrong instantaneous-frequency estimate (no bin de-trending, sign-preserving `%` wrap), incoherent phases for colliding bins, output 68 samples short, and multichannel input failed with a shape error. A 440 Hz tone shifted +2 st now peaks at 494.0 Hz (was 505.7 Hz).
 - `pad_samples_right` could return one sample fewer than requested (samples -> seconds -> samples truncation).
@@ -459,8 +463,8 @@ The librosa-compatible API is unreleased, so these are changes to the
   not retained, and ratios that would need more than 2^25 coefficients return a `ParameterError` from
   `resample`, `resample_by_ratio` and `StreamingResampler::new` instead of aborting.
 - **Non-finite audio is rejected by the librosa-compatible operations** (`AudioSpectrum`, `AudioFeatures`,
-  `AudioTonal`, `AudioConstantQ`, `AudioRhythm`, `AudioEffects`) with a `ParameterError`, as librosa does;
-  previously a single NaN produced meaningless output without an error.
+  `AudioTonal`, `AudioConstantQ`, `AudioRhythm`, `AudioEffects`) with a `ParameterError`; previously a
+  single NaN produced meaningless output without an error.
 - **Extreme parameters no longer abort the process**: `mu_law_encode` (very large `mu`; `mu > 2^53` is an error),
   `pyin` (very small `resolution`), `tempo`/tempograms (very large `ac_size`/`win_length`), `estimate_tuning`/
   `pitch_tuning` (very small `resolution`), `clicks` and `time_stretch` (very small `rate`) validate derived buffer sizes.
@@ -473,9 +477,8 @@ The librosa-compatible API is unreleased, so these are changes to the
   does; they converted to `f32` first, so output was only accurate to about
   1.2e-7 of full scale. `i32` and `f64` output changes by up to that amount;
   `u8`, `i16`, `I24` and `f32` output is unchanged. Fast upsampling now reads
-  the input in place and writes the output directly: 10 s at 22.05 -> 44.1 kHz
-  or 16 -> 48 kHz takes 0.06-0.19 ms for `f32` (was 0.48-2.6 ms), 0.16-0.37 ms
-  for `f64` (was 0.6-3.9 ms) and 0.46-0.93 ms for `i32` (was 0.6-2.9 ms).
+  the input in place and writes the output directly, which makes it several
+  times faster.
 
 - Size-driven building blocks return `ParameterError` instead of aborting on a failed allocation (or
   panicking with "capacity overflow"): `get_window`, `window_bandwidth`, `window_sumsquare`,
@@ -488,13 +491,12 @@ The librosa-compatible API is unreleased, so these are changes to the
 
 ### Fixed (correctness for teaching use)
 
-The documentation was checked formula by formula against the code and against
-SciPy/librosa/closed-form results. Each fix below has a regression
-test (`tests/*_regressions.rs`). Several change numerical output; they now match
-their documented definitions. Bugs found the same way are listed once,
-under *Fixed* above: YIN, `estimate_key`, `autocorrelation` scaling,
-`levinson_durbin`, the resampler, `complex_onset_detection`, the odd-length
-spectral bin spacing, `frequency_to_note` and `mu_compress`/`mu_expand`.
+Each fix below has a regression test (`tests/*_regressions.rs`). Several
+change numerical output so that it follows the documented definition. Related
+fixes are listed under *Fixed* above: YIN, `estimate_key`, `autocorrelation`
+scaling, `levinson_durbin`, the resampler, `complex_onset_detection`, the
+odd-length spectral bin spacing, `frequency_to_note` and
+`mu_compress`/`mu_expand`.
 
 - **Dynamics:** the envelope follower used the release time almost
   everywhere (a 1 ms attack reached 3 % instead of 63 % after 1 ms), so every
@@ -515,8 +517,8 @@ spectral bin spacing, `frequency_to_note` and `mu_compress`/`mu_expand`.
   normalisation subtracted the middle sample, not the median; `GaussianNoise`
   perturbation added uniform noise at the wrong SNR (and pink was white);
   `am_signal` depth now follows the standard AM definition.
-- **Spectral:** `power_spectral_density` now has SciPy `welch` density
-  scaling (it was off by N·Σw²/2); spectrograms, mel, MFCC, chroma, gammatone
+- **Spectral:** `power_spectral_density` now has Welch density scaling
+  (power per Hz; it was off by N·Σw²/2); spectrograms, mel, MFCC, chroma, gammatone
   and CQT of integer audio used a raw cast (i16 power 2³⁰ too large);
   `HpssConfig::num_freq_bins` for odd FFT sizes; spectrum/phase plot axes and
   spectrogram plot sample rate.
@@ -527,9 +529,10 @@ spectral bin spacing, `frequency_to_note` and `mu_compress`/`mu_expand`.
   `Unsupported` (it is not implemented).
 - **Documentation:** about 150 formulas and claims corrected so that the docs
   state what the code computes (conventions, normalisation, units, dB
-  references), with librosa/SciPy differences called out (symmetric Hann,
-  Slaney mel on power, unnormalised DCT-II with lifter 22, absolute dB floor,
-  HTK `audio_math` mel helpers, ZCR in crossings per second). The perceptual
+  references), with the conventions that vary between references stated
+  explicitly (symmetric Hann, Slaney mel on power, unnormalised DCT-II with
+  lifter 22, absolute dB floor, HTK `audio_math` mel helpers, ZCR in crossings
+  per second). The perceptual
   codec docs were scientifically corrected and the Opus module is described
   as an Opus-inspired teaching codec, not bitstream compatible.
 
@@ -542,13 +545,11 @@ spectral bin spacing, `frequency_to_note` and `mu_compress`/`mu_expand`.
   values with a vectorised kernel instead of the C library's `log10`. Each
   logarithm is the correctly rounded value except within about 2^-70 of a
   rounding boundary, and differs from glibc's (which is not correctly rounded)
-  by at most 1 ulp, toward the exact result. On the benchmark inputs 2 % to
-  22 % of the output values change, by at most 2 ulp for the dB conversions
-  and at most 8e-14 dB for the weightings. Results are the same on machines
+  by at most 1 ulp, toward the exact result. Output values change by at most
+  2 ulp for the dB conversions and at most 8e-14 dB for the weightings. Results are the same on machines
   with and without FMA.
 
-- Filter parameter validation follows SciPy: any edge in `(0, Nyquist)` is
-  accepted (the previous Chebyshev/elliptic `0.95·Nyquist` limit is gone), any
+- Filter parameter validation accepts any edge in `(0, Nyquist)` (the previous Chebyshev/elliptic `0.95·Nyquist` limit is gone), any
   positive ripple is accepted (was ≤ 5 dB), and the maximum order is 24
   (was 12).
 - `processing` now enables `iir-filtering` (the simple filters are built on it).
@@ -557,15 +558,15 @@ spectral bin spacing, `frequency_to_note` and `mu_compress`/`mu_expand`.
 - `AudioIirFiltering::frequency_response` is deprecated: it never had a filter
   to describe and always returned a flat response.
 - `PeakPickingConfig::default()` (used by `OnsetDetectionConfig::default()`, `ComplexOnsetConfig::default()` and `SpectralFluxConfig::complex()`) now uses a 9-frame delta threshold (delta 0.07) with an absolute floor of 0.1, a 3-frame minimum separation and no median filter. The old defaults (1024-frame threshold window, 3-point median filter, 512-frame separation) found about 10% of onsets; `detect_onsets` with the default config now finds all 10 notes of a test sequence (was 1). The `music`/`speech`/`drums` presets are unchanged.
-- `note_to_midi` (and so `note_to_frequency`) accepts librosa's note grammar: lowercase letters, any run of `#` `♯` `b` `!` `♭` `𝄪` `𝄫` `♮` accidentals (B#3 = 60, Cb4 = 59, double accidentals), signed octaves (`C-1` = 0) and a cents suffix rounded half to even (`A4+50` = 70). The octave remains required and the result remains a `u8` in `0..=127`.
+- `note_to_midi` (and so `note_to_frequency`) accepts a wider note grammar: lowercase letters, any run of `#` `♯` `b` `!` `♭` `𝄪` `𝄫` `♮` accidentals (B#3 = 60, Cb4 = 59, double accidentals), signed octaves (`C-1` = 0) and a cents suffix rounded half to even (`A4+50` = 70). The octave remains required and the result remains a `u8` in `0..=127`.
 - `BeatTrackingData::beat_times` / `track_beats_core` are now sorted chronologically and de-duplicated (they were in detection order). `BeatTrackingData::tempo_bpm` is documented as the requested tempo (it is not estimated); its `Display` prints "Tempo:".
-- `resampling` feature: Medium/High/Fast-downsampling are 2-3x slower than the previous (incorrect) rubato path for the same ratio (longer, soxr_hq-like filters). `rubato` remains a dependency (the `audioadapter::Adapter` impl on `AudioSamples`).
+- `resampling` feature: Medium/High/Fast downsampling take 2-3x longer than before for the same ratio, because their anti-aliasing filters are longer and now correct.
 - The `pitch-analysis` feature now also enables `sequence` (pYIN's Viterbi decoding).
 - `realfft` is now a direct optional dependency of the `transforms` feature (it was already a
   transitive dependency via `spectrograms`).
 - Documentation: `hz_to_mel`, `mel_to_hz`, `mel_scale` and `mel_frequencies` state that they use
-  the HTK scale (librosa's default is Slaney); `time_to_frames` documents how its rounding differs
-  from librosa; the two `seconds_to_samples` functions document their different rounding.
+  the HTK scale; `time_to_frames` documents its rounding; the two `seconds_to_samples` functions
+  document their different rounding.
 
 - Performance (results unchanged up to floating-point round-off):
   - `stft`: blocked output transpose, no whole-signal scratch buffer (~2x faster).
@@ -577,12 +578,12 @@ spectral bin spacing, `frequency_to_note` and `mu_compress`/`mu_expand`.
   - Phase vocoder (`time_stretch`, `pitch_shift`) computes each frame's phase and magnitude once
     (~1.45x / ~1.5x faster, bit-identical).
   - Fewer whole-signal copies in `AudioEffects` methods returning audio.
-- The `resampling` feature names `realfft` explicitly (already a dependency through `rubato`).
+- The `resampling` feature depends on `realfft` directly.
 
 - **Resampling / `pitch_shift`: filter tables are shared and cheap to build.** Interpolated (awkward-ratio)
   tables depend only on quality and relative bandwidth, so all upsampling ratios of one quality share one
-  table, sampled from a per-quality prototype. `pitch_shift` with a new `n_steps` no longer pays ~30 ms to
-  build a table; a sweep over 25 distinct shifts went from 777 ms to 150 ms. Common (small-L) ratios are
+  table, sampled from a per-quality prototype, so `pitch_shift` with a new `n_steps` no longer builds a
+  table of its own and a sweep over many distinct shifts runs about five times faster. Common (small-L) ratios are
   bit-identical; awkward ratios change below the table-interpolation error (< -120 dB).
 
 ### Known issues
@@ -605,7 +606,7 @@ upgrade steps.
 
 - IIR filters: Chebyshev II, Elliptic (Cauer), and Bessel designs, plus
   band-stop responses and a corrected band-pass transform, applied through
-  `apply_iir_filter`. Cross-checked against `scipy.signal`.
+  `apply_iir_filter`, checked against reference designs.
 - Zero-phase `filtfilt` and a design-once streaming `SosFilter`
   (`from_design` / `process_block`).
 - Spectral feature suite on `AudioStatistics`: bandwidth, flatness, contrast,

@@ -14,7 +14,7 @@ $$X[k] = \sum_{n=0}^{N-1} x[n] \, e^{-j 2\pi k n / N}$$
 
 where $k$ is the integer bin index, $j = \sqrt{-1}$ and $X[k]$ is a complex
 number in the units of $x$ (here: full scale) times samples. The exponent is
-**negative** and there is **no** $1/N$ factor (the same as `numpy.fft.fft`).
+**negative** and there is **no** $1/N$ factor.
 
 **Bin frequencies.** Bin $k$ is at
 
@@ -50,7 +50,7 @@ This crate's `WindowType::Hanning` is the **symmetric** Hann window
 $$w[n] = 0.5 - 0.5\cos\!\left(\frac{2\pi n}{N-1}\right)$$
 
 (denominator $N-1$, so $w[0] = w[N-1] = 0$), not the periodic one (denominator
-$N$) that SciPy uses by default for spectra.
+$N$) that many analysis tools use by default for spectra.
 
 **Zero padding** (appending zeros before the DFT) samples the same spectrum on
 a finer grid. It does **not** narrow the main lobe; only a longer stretch of
@@ -59,8 +59,8 @@ signal does.
 ## With the library
 
 [`fft`](crate::AudioTransforms::fft) returns the complex non-negative-frequency
-bins, [`rfft`](crate::AudioTransforms::rfft) their **magnitudes** (numpy's
-`rfft` returns complex values):
+bins, [`rfft`](crate::AudioTransforms::rfft) their **magnitudes** (real
+numbers, not complex values):
 
 ```rust
 use audio_samples::{AudioSamples, AudioTransforms, nzu, sample_rate};
@@ -303,15 +303,15 @@ assert_eq!(count(1024), 1);
 
 ## Common pitfalls
 
-* [`rfft`](crate::AudioTransforms::rfft) returns **magnitudes**, not numpy's
-  complex `rfft`; use [`fft`](crate::AudioTransforms::fft) for phase.
+* [`rfft`](crate::AudioTransforms::rfft) returns **magnitudes**, not complex
+  values; use [`fft`](crate::AudioTransforms::fft) for phase.
 * Neither transform normalises: a full-scale bin-centred sine gives $N/2$, not 1
   or 0.5. Divide by $\sum w / 2$ to read amplitudes.
 * `n_fft` must be **at least** the signal length (shorter signals are
   zero-padded; longer ones are an error, not truncated).
-* `WindowType::Hanning` is the **symmetric** Hann; SciPy's
-  `get_window('hann', N)` uses the periodic one. Values differ by a fraction
-  of a percent; use `WindowType::Custom` to match it exactly.
+* `WindowType::Hanning` is the **symmetric** Hann; many analysis tools
+  default to the periodic one. Values differ by a fraction of a percent; pass a
+  periodic window through `WindowType::Custom` when you need it.
 * Zero padding interpolates the spectrum onto a finer grid; it does not improve
   resolution.
 * The Kaiser window in `spectrograms` 2.1.3 is wrong for $\beta > 3.75$; avoid

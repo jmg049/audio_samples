@@ -18,7 +18,7 @@ library's conventions differ from them.
   parameter, the value and the valid range (with the `fancy` feature, as
   coloured `miette` reports). In Python most of them are raised as
   `audio_samples.exceptions` classes carrying `.code` and `.help` (a few
-  parameter constructors still raise a plain `ValueError`).
+  parameter constructors raise a plain `ValueError`).
 - **Built-in explanations** (`educational` feature). A supported
   configuration can describe what it will do before it runs: the formula the
   code evaluates, every symbol with its unit, the derived resolution and
@@ -114,8 +114,8 @@ ask them to remove every warning.
 
 ## Verifying results against SciPy and other references
 
-The IIR filters are already checked against SciPy, FFmpeg, DSPFilters and
-liquid-dsp golden fixtures (`tests/filter_reference.rs`, generator in
+The IIR filters are checked against golden fixtures from SciPy, FFmpeg,
+DSPFilters and liquid-dsp (`tests/filter_reference.rs`, generator in
 `tests/reference/`). For other topics, compare with these conventions in mind:
 
 | Topic | `audio_samples` | Reference | To compare like with like |
@@ -128,13 +128,13 @@ liquid-dsp golden fixtures (`tests/filter_reference.rs`, generator in
 | dB | 10·log10(max(P, floor)) re 1: an absolute floor | – | no clipping relative to the maximum |
 | MFCC | unnormalised DCT-II, lifter 22 | – | rescale by the DCT normalisation factors; set the lifter |
 | Zero-crossing rate | crossings per second over the whole signal | – | divide by the sample rate; frame the signal |
-| Welch PSD | SciPy `welch(scaling="density")` scaling, symmetric Hann, no detrending | SciPy: periodic Hann, constant detrend | `window=hann(N, sym=True)`, `detrend=False` |
+| Welch PSD | density scaling (power per Hz), symmetric Hann, no detrending | SciPy: periodic Hann, constant detrend | `window=hann(N, sym=True)`, `detrend=False` |
 | Integer to float | asymmetric: −1.0 ↔ −32768, +1.0 ↔ 32767 | soundfile: divide by 32768 | differs by at most one least significant bit |
 | YIN | de Cheveigné and Kawahara steps 1–4, then parabolic interpolation of the normalised difference d′ (the paper's step 5 interpolates the raw difference d, and its step 6 is omitted), with d summed over all N − τ overlapping pairs; a frame with no dip below the threshold is unvoiced; `detect_pitch_yin` is clip-wide | the paper: sums d over a fixed window, falls back to the global minimum | compare with `track_pitch`, framewise, on clearly voiced frames |
 
 To compare with librosa, see the
 [migration guide](https://github.com/jmg049/audio_samples/blob/main/documentation/LIBROSA_MIGRATION.md):
-it lists the crate's librosa-compatible APIs and how the older APIs used in this
+it lists the crate's librosa-compatible APIs and how the APIs used in this
 guide differ from librosa.
 
 Known limitations worth telling students about are documented in each module
@@ -170,5 +170,5 @@ Limitations of the teaching material itself:
 - Python: `pip install audio_samples`, then
   `pip install matplotlib scipy librosa jupyter pytest nbmake` for the
   notebooks and their checks. The notebooks need the `audio_samples.explain`
-  module; if the installed release does not have it yet, build the bindings
-  from source with `maturin develop --release`.
+  module; if the installed release lacks it, build the bindings from source
+  with `maturin develop --release`.

@@ -6,13 +6,9 @@ Each section corresponds to a minor version release. Each minor release will foc
 
 The exact ordering of the minor releases may change and there is no guarantee they will be worked on in the order they are listed here.
 
-## 2.0 --- A unified API
+## API stability
 
-AudioSamples 2.0 is a deliberate breaking release that unifies the public
-API into a single, consistent convention. The library covers many
-operations; 2.0 makes their signatures and naming consistent.
-
-Headline changes in 2.0:
+Version 2.0 unified the public API into a single convention:
 
 - Dual-variant operations: every transforming operation exposes both an
   in-place primitive (`op_in_place(&mut self) -> Result<()>`) and a
@@ -26,10 +22,10 @@ Headline changes in 2.0:
   builders/validation for multi-parameter operations, and structured return
   types (`Psd`, `PitchContour`, `Key`) in place of bare tuples.
 
-Post-2.0 the API is intended to remain stable: subsequent changes should be
-additive, with deprecations rather than silent breakage.
+From 2.0 on the API is intended to remain stable: changes should be additive,
+with deprecations rather than silent breakage.
 
-Ongoing quality criteria (across releases):
+Quality criteria for every release:
 
 - Comprehensive documentation: all public APIs fully documented with clear
   explanations, usage examples, and notes on edge cases.
@@ -41,28 +37,26 @@ Ongoing quality criteria (across releases):
 
 ## Error handling
 
-- Need to move towards using `miette` for improved error reporting and diagnostics. This will involve updating the existing error handling code to use `miette`'s error types and reporting mechanisms, as well as ensuring that all errors are properly propagated and handled throughout the library.
-
-- Need to ensure proper usage and coverage of the existing error types in terms of correct usage, informative information and messages, and comprehensive coverage of all error cases.
+- Check that every error case is covered by the most specific error type, and that each message and diagnostic says what went wrong and how to fix it.
 
 ## Plotting and DSP overlays
 
-- Need to tidy up and expand the plotting and DSP overlay features, including adding more examples, improving documentation, and ensuring that the API is intuitive and easy to use.
+- Tidy up and expand the plotting and DSP overlay features: more examples, better documentation, and a more intuitive API.
 
-- A large chunk of this will be improving the `html_view` crate and its integration with `audio_samples` to allow for more interactive and informative visualizations of audio data and DSP overlays. This could include features such as live plotting of audio data, interactive controls for adjusting DSP parameters and seeing the effects in real time, and more advanced visualizations of audio features and processing results.
+- Improve the `html_view` crate and its integration with `audio_samples` for more interactive and informative visualisations of audio data and DSP overlays: live plotting, interactive controls for adjusting DSP parameters and hearing the effect in real time, and richer views of audio features and processing results.
 
 - The plotting system is built on plotly and HTML, which leaves room for interactive features.
 
 ## Educational content
 
-- A long-term goal of the project is to enable new and existing audio programmers to learn about audio programming concepts and techniques through the use of the library and its documentation. We often use libraries without understanding the underlying mechanisms and techniques, which is fine, but we should make it easy for users to learn about the underlying concepts if they want to.
+- A long-term goal of the project is to help new and existing audio programmers learn audio programming concepts and techniques through the library and its documentation. Libraries are often used without understanding the mechanisms underneath, which is fine, but users who want to learn those concepts should find it easy.
 
-- Use the plotting and DSP overlay features. Use `manim` and `audio_samples_python` to create educational content that explains audio programming concepts and techniques. These could take the form of short form videos, interactive notebooks, or even full courses on audio programming topics.
+- Use the plotting and DSP overlay features, `manim` and `audio_samples_python` to create educational content that explains audio programming concepts and techniques: short videos, interactive notebooks, or full courses on audio programming topics.
 
-## ML Integration
+## ML integration
 
-- `audio_samples_python` implements the numpy array protocol and the dlpack protocol. This means that we can easily convert audio data to and from numpy arrays, and we can also convert audio data to and from dlpack tensors. The Rust version `audio_samples` does not yet implement the dlpack protocol, but this is something that could be added in the future to allow for even easier integration with machine learning frameworks that support dlpack such as `candle`, `ort`, `tch`, etc.
+- `audio_samples_python` implements the array protocol and the DLPack protocol, so audio converts to and from Python arrays and DLPack tensors. The Rust crate does not implement DLPack yet; adding it would ease integration with machine learning frameworks that support it, such as `candle`, `ort` and `tch`.
 
-## General Extensions
+## General extensions
 
-- Need to integrate newer features from the ``Spectrograms`` crate, such as the binaural spectrograms.
+- Integrate further features from the `spectrograms` crate, such as binaural spectrograms.

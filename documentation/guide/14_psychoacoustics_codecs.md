@@ -353,7 +353,7 @@ for (x, y) in xs.iter().zip(back.as_slice().unwrap()) {
 
 ## Ask the library to explain
 
-There is no explainer for psychoacoustics or codecs yet (see
+There is no explainer for psychoacoustics or codecs (see
 [`topics`](crate::educational::topics) for what exists). The closest is the
 quantisation topic, which gives the uniform-quantiser SNR that μ-law improves
 on for quiet signals:

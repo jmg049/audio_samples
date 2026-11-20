@@ -83,10 +83,10 @@ from librosa, the cause is listed under
 - **Names.** librosa's name is kept unless it clashes with an existing method.
   Clashing frame-wise variants take a `_frames` suffix (`mfcc_frames`,
   `spectral_centroid_frames`, `rms_frames`, ...), and the complex STFT is
-  `stft_matrix` / `istft_matrix`. The older methods with the plain names
-  (`AudioTransforms::mfcc`, `AudioStatistics::spectral_centroid`, ...) keep
-  their original behaviour, which is *not* librosa's (see
-  [Existing APIs that differ from librosa](#existing-apis-that-differ-from-librosa)).
+  `stft_matrix` / `istft_matrix`. The methods with the plain names
+  (`AudioTransforms::mfcc`, `AudioStatistics::spectral_centroid`, ...) are
+  separate operations with their own conventions, which are *not* librosa's (see
+  [Other APIs that differ from librosa](#other-apis-that-differ-from-librosa)).
 - **Where things live.** The traits (`AudioSpectrum`, `AudioFeatures`,
   `AudioTonal`, `AudioConstantQ`, `AudioRhythm`, `AudioEffects`,
   `AudioPitchTracking`) and their config types are re-exported at the crate
@@ -318,7 +318,7 @@ function under `audio_samples::`.
 | `get_duration` | `AudioSamples::duration_seconds` | – | equivalent with differences | Audio only; `S=` and `path=` are in Python, `forms.get_duration` |
 | `resample` | `AudioProcessing::resample`, `AudioProcessing::resample_by_ratio`, `resample`, `resample_by_ratio` | `resampling` | equivalent with differences | Own Kaiser-windowed sinc instead of soxr; output length is exactly `ceil(n * out / in)` |
 | `to_mono` | `AudioChannelOps::to_mono(MonoConversionMethod::Average)` | `channels` | equivalent | |
-| `to_stereo` | `AudioChannelOps::to_stereo(StereoConversionMethod::...)` | `channels` | equivalent with differences | `Duplicate` is `to_stereo(left=m, right=m)`; `Left`/`Right` give `[m, 0]` / `[0, m]` for mono input (on multi-channel input they extract channel 0 / 1 as mono, kept from 2.0). There is no two-signal form; use `AudioEditing::stack` |
+| `to_stereo` | `AudioChannelOps::to_stereo(StereoConversionMethod::...)` | `channels` | equivalent with differences | `Duplicate` is `to_stereo(left=m, right=m)`; `Left`/`Right` give `[m, 0]` / `[0, m]` for mono input (on multi-channel input they extract channel 0 / 1 as mono). There is no two-signal form; use `AudioEditing::stack` |
 | `to_multi` | `AudioEditing::stack` | `editing` | equivalent with differences | No pad or trim to a common length |
 | `autocorrelate` | `AudioStatistics::autocorrelation` | `statistics` | equivalent with differences | Returns the unbiased estimate: `r[k] * (n - k)` equals librosa's raw sum. librosa also autocorrelates every channel |
 | `lpc` | `AudioEffects::lpc`, `operations::effects::lpc` | `effects` | equivalent | Burg's method, one row per channel |
@@ -387,16 +387,16 @@ functions; the frame and time helpers also have `_slice` forms for arrays.
 | librosa | audio_samples | status | notes |
 |---|---|---|---|
 | `frames_to_samples` | `frames_to_samples`, `frames_to_samples_slice` | equivalent | Negative frames and the `n_fft` offset are supported |
-| `frames_to_time` | `frames_to_time_with_offset`, `frames_to_time_with_offset_slice` | equivalent | The older `frames_to_time` has no `n_fft` offset |
+| `frames_to_time` | `frames_to_time_with_offset`, `frames_to_time_with_offset_slice` | equivalent | `frames_to_time` has no `n_fft` offset |
 | `samples_to_frames` | `samples_to_frames`, `samples_to_frames_slice` | equivalent | |
 | `samples_to_time` | `samples_to_time` | equivalent | |
-| `time_to_frames` | `time_to_frames_floor`, `time_to_frames_floor_slice` | equivalent | The older `time_to_frames` rounds to the nearest frame |
+| `time_to_frames` | `time_to_frames_floor`, `time_to_frames_floor_slice` | equivalent | `time_to_frames` rounds to the nearest frame |
 | `time_to_samples` | `time_to_samples`, `time_to_samples_slice` | equivalent | |
 | `blocks_to_frames`, `blocks_to_samples`, `blocks_to_time` | `utils::audio_math::blocks_to_frames`, `blocks_to_samples`, `blocks_to_time` | equivalent | Scalar `i64` block indices; `blocks_to_time` takes the rate last |
 | `times_like` | `times_like` | equivalent | |
 | `samples_like` | `samples_like` | equivalent | |
 | `fft_frequencies` | `fft_frequencies` | equivalent | |
-| `mel_frequencies` | `mel_frequencies_with_scale(.., MelScale::Slaney)` | equivalent | The older `mel_frequencies` / `mel_scale` use the HTK scale |
+| `mel_frequencies` | `mel_frequencies_with_scale(.., MelScale::Slaney)` | equivalent | `mel_frequencies` / `mel_scale` use the HTK scale |
 | `hz_to_mel` | `hz_to_mel_with_scale` | equivalent | `MelScale::Slaney` is librosa's default, `MelScale::Htk` is `htk=True` |
 | `mel_to_hz` | `mel_to_hz_with_scale` | equivalent | As above |
 | `cqt_frequencies` | `cqt_frequencies`, `cqt_frequencies_into` (into a caller's slice) | equivalent | |
@@ -756,13 +756,12 @@ librosa's defaults.
   scikit-learn, whose distances can differ by round-off). librosa's
   connectivity-mode tie-breaking (lowest frame index wins) is reproduced exactly.
 
-### Existing APIs that differ from librosa
+### Other APIs that differ from librosa
 
-The crate's older APIs keep their behaviour for compatibility. They are not
-librosa-compatible. Use the librosa-compatible API listed in the table above
-instead.
+These APIs follow their own conventions and do not reproduce librosa. To port
+librosa code, use the API in the right-hand column.
 
-| Existing API | Difference from librosa | librosa-compatible API |
+| API | Difference from librosa | librosa-compatible API |
 |---|---|---|
 | `AudioTransforms::stft`, `istft`, `mel_spectrogram`, `chromagram`, `constant_q_transform` | Delegate to the `spectrograms` crate: symmetric windows, mono only, absolute dB floor, `MelNorm::None` by default, a different chroma filterbank and CQT kernel | `AudioSpectrum`, `AudioTonal`, `AudioConstantQ` |
 | `AudioTransforms::mfcc` | Five independent differences: symmetric window, mel norm none, absolute -80 dB floor, unnormalised DCT-II, HTK-style lifter 22 by default | `AudioSpectrum::mfcc_frames` |
@@ -820,7 +819,7 @@ uv run --project tests/reference/analysis tests/reference/analysis/generate_anal
 uv run --project tests/reference/analysis tests/reference/analysis/generate_analysis_fixtures.py --check
 ```
 
-The `pre-commit` hooks `librosa-reference-tests` and `librosa-fixtures-fresh`
+The `pre-commit` hooks `analysis-reference-tests` and `analysis-fixtures-fresh`
 (scripts in `tests/reference/hooks/`) run these automatically when the
 librosa-compatible code, the generator or the fixtures change.
 

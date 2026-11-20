@@ -63,8 +63,10 @@ than a minimum are removed.
 crossings per sample, and skips exact zeros.
 [`AudioStatistics::zero_crossing_rate`](crate::AudioStatistics::zero_crossing_rate)
 is for the **whole signal** and is in **crossings per second**; its crossing
-rule treats an exact zero as non-positive. There is no frame-wise ZCR function,
-so this chapter computes it directly.
+rule treats an exact zero as non-positive. The frame-wise
+[`zero_crossing_rate_frames`](crate::AudioFeatures::zero_crossing_rate_frames)
+uses centred frames and divides by the frame length, so this chapter computes
+the VAD's version directly.
 
 ## With the library
 

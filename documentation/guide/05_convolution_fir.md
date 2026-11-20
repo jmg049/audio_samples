@@ -87,7 +87,7 @@ Hamming *window's* own peak side lobe, $-43$ dB (chapter 03).
 
 [`AudioTransforms::convolve`](crate::AudioTransforms::convolve) returns the
 full convolution; [`AudioProcessing::apply_filter`](crate::AudioProcessing::apply_filter)
-returns the valid part (what `numpy.convolve(x, h, 'valid')` gives).
+returns the valid part.
 
 ```rust
 use audio_samples::educational::topics;
@@ -387,9 +387,9 @@ assert!(doc.has_warning_containing("type I") && doc.quantity("Group delay").unwr
 * Even-length symmetric filters (type II) always have a zero at Nyquist and
   cannot be high-pass; spectral inversion needs an odd length.
 * A windowed sinc is $-6$ dB (not $-3$ dB) at its design cutoff.
-* SciPy's `lfilter(h, 1, x)` returns the full-length causal output; the crate's
-  `apply_filter` equals `lfilter(h, 1, x)[M-1:]`. Drop the first $M - 1$
-  samples of the SciPy output before comparing.
+* A causal filter routine that returns one output per input sample gives
+  $M - 1$ more samples at the start than `apply_filter`. Drop its first
+  $M - 1$ samples before comparing.
 
 ## References
 

@@ -69,7 +69,7 @@ $f_N = \min(f_{in}, f_{out})/2$; the stop band starts at $f_N$:
   to $0.80 f_N$ and 70 dB of stop-band attenuation; when upsampling, linear
   interpolation (no anti-imaging filter).
 - `Medium`: pass band to $0.90 f_N$, 100 dB.
-- `High`: pass band to $0.913 f_N$, 125 dB (close to soxr's `soxr_hq`).
+- `High`: pass band to $0.913 f_N$, 125 dB.
 
 The filter is computed in the buffer's float type: `f32` for `f32`, `i16`,
 `I24` and `u8` buffers, `f64` for `f64` and `i32` ones.
@@ -477,8 +477,8 @@ assert!(1e-7 / slope < 5.1e-7);
 - **Measure rejection away from the ends.** The input is treated as zero
   outside the buffer, so a signal that starts or stops abruptly produces
   broadband clicks that no anti-aliasing filter removes.
-- **SciPy differs in defaults.** `scipy.signal.resample` uses the FFT
-  (assuming a periodic signal); `resample_poly` uses a Kaiser-windowed FIR.
+- **Other resamplers differ in their defaults.** An FFT resampler treats the
+  signal as periodic, and polyphase resamplers use their own FIR filters.
   Expect small differences in edge behaviour and alignment, not in the pass
   band.
 - **Output length** is $\lceil N r \rceil$ frames; durations that are not whole

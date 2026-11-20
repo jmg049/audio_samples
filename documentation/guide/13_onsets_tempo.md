@@ -120,11 +120,11 @@ peak at 0.030, 0.025 and 0.087 of the strongest (the CQT response varies from
 click to click; see below). Lowering `adaptive_threshold.min_threshold` to
 0.01 finds all 8.
 
-Earlier releases sized these lengths as if they counted audio samples
-(threshold window 1024, separation 512, median length 3). Switching such
-values on one at a time from the configuration with the 0.01 floor (the lab,
-on 8 bursts) shows the effect of each: the length-3 median deletes every one-frame
-peak (0 onsets); a 1024-frame threshold window, clipped to the signal length,
+Lengths chosen as if they counted audio samples are far too large in frames.
+Starting from the configuration with the 0.01 floor (the lab, on 8 bursts) and
+switching on one such setting at a time (a median filter of length 3, a
+threshold window of 1024, a separation of 512) shows the effect of each: the
+length-3 median deletes every one-frame peak (0 onsets); a 1024-frame threshold window, clipped to the signal length,
 makes the threshold the global maximum minus $\delta$ (1 onset); a 512-frame
 separation, reduced to a quarter of the signal (91 frames, 1.06 s), keeps only
 3. Switching pre-emphasis off changes nothing on this signal (8). The fields

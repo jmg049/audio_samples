@@ -225,7 +225,7 @@ Provides supporting functionality organized by purpose:
 - `generation.rs`: Signal generation. Beyond the classic oscillators (`sine_wave`, `cosine_wave`, `square_wave`, `triangle_wave`, `sawtooth_wave`, `chirp`, `impulse`, `silence`, `compound_tone`, `am_signal`), this includes exponential/log chirps (`exponential_chirp`), band-limited oscillators (`square_wave_bandlimited`, `sawtooth_wave_bandlimited`, `triangle_wave_bandlimited`), FM signals (`fm_signal`), and the noise sources `white_noise`/`pink_noise`/`brown_noise` (under `random-generation`).
 - `detection.rs`: Feature detection algorithms
 - `comparison.rs`: Audio comparison and similarity metrics - `correlation`, `mse`, `snr`, `psnr`, `segmental_snr`, `log_spectral_distance`, plus per-channel variants of the first three (`correlation_per_channel`, `mse_per_channel`, `snr_per_channel`).
-- `audio_math.rs`: Audio-domain mathematical utilities and canonical unit conversions, including the librosa-compatible mel scales, frame/sample/time conversions and tuning helpers.
+- `audio_math.rs`: Audio-domain mathematical utilities and canonical unit conversions, including the Slaney and HTK mel scales, frame/sample/time conversions and tuning helpers.
 
 **Design Patterns:**
 
@@ -280,7 +280,7 @@ Available:
 - AudioDecomposition
 - AudioTypeConversion
 
-librosa-compatible (each defined in its own module together with its implementation; see [librosa-compatible analysis](#librosa-compatible-analysis)):
+Frame-wise analysis (each defined in its own module together with its implementation; see [Frame-wise analysis](#frame-wise-analysis)):
 
 - AudioSpectrum (STFT/ISTFT, mel spectrogram, MFCC; `transforms`)
 - AudioFeatures (frame-wise spectral features, RMS, ZCR, reassigned spectrogram; `feature-extraction`)
@@ -367,7 +367,7 @@ buf.scale_in_place(0.8);
 - `scale()`: amplitude scaling (infallible)
 - `clip()`: hard limiting to prevent overflows
 - `remove_dc_offset()`: DC bias removal
-- `apply_window_f64()` (replaces the deprecated `apply_window()`), `apply_filter()` / `apply_filter_f64()`, `mu_compress()`/`mu_expand()`, `low_pass_filter()`/`high_pass_filter()`/`band_pass_filter()`
+- `apply_window_f64()` (`apply_window()` is deprecated), `apply_filter()` / `apply_filter_f64()`, `mu_compress()`/`mu_expand()`, `low_pass_filter()`/`high_pass_filter()`/`band_pass_filter()`
 
 (Fades are on `AudioEditing`, not here.)
 
@@ -396,7 +396,7 @@ let psd = audio.power_spectral_density(nzu!(1024), 0.5)?; // -> Psd
 - `power_spectral_density()`: returns a structured `Psd { frequencies, density }` rather than a bare tuple (access via `frequencies()` / `density()` / `into_parts()`)
 - `convolve()`, `deconvolve()`: FFT-based linear convolution and regularised deconvolution
 
-**Structured returns**: where a pre-2.0 API returned a loose tuple, the modern API returns a named type - for example `power_spectral_density` yields `Psd`, and (in the pitch-analysis trait) `track_pitch` yields `PitchContour` and `estimate_key` yields `Key { tonic, mode, confidence }`.
+**Structured returns**: operations that produce several related values return a named type rather than a tuple - for example `power_spectral_density` yields `Psd`, and (in the pitch-analysis trait) `track_pitch` yields `PitchContour` and `estimate_key` yields `Key { tonic, mode, confidence }`.
 
 **Performance Considerations**:
 
@@ -501,12 +501,12 @@ sos.process_block(&mut block);
 **Key capabilities**:
 
 - `IirFilterDesign`: a single struct describing family + response + order + cut-off(s) + ripple/attenuation (+ Bessel normalisation), built with constructors such as `butterworth_lowpass`, `chebyshev_i`, `chebyshev_i_band`, `chebyshev_ii`, `bessel`, `elliptic`.
-- `apply_iir_filter()` / `apply_iir_filter_in_place()`: apply a design (≡ `scipy.signal.sosfilt`).
-- `filtfilt()` / `filtfilt_in_place()`: zero-phase forward-backward filtering (≡ `scipy.signal.sosfiltfilt`: odd padding, steady-state initial conditions), squaring the magnitude response while cancelling group delay.
-- `SosFilter::from_design(..)` + `process_block(&mut [f64])`: a design-once, second-order-sections filter that carries state across calls for streaming use; `SosFilter::from_sos_coefficients` / `sos_coefficients` exchange SciPy/MATLAB `sos` arrays.
+- `apply_iir_filter()` / `apply_iir_filter_in_place()`: apply a design as a cascade of second-order sections.
+- `filtfilt()` / `filtfilt_in_place()`: zero-phase forward-backward filtering (odd-extension padding, steady-state initial conditions), squaring the magnitude response while cancelling group delay.
+- `SosFilter::from_design(..)` + `process_block(&mut [f64])`: a design-once, second-order-sections filter that carries state across calls for streaming use; `SosFilter::from_sos_coefficients` / `sos_coefficients` exchange coefficients as `sos` rows, one `[b0, b1, b2, a0, a1, a2]` per section.
 - `IirFilterDesign::frequency_response()` / `SosFilter::frequency_response()`: magnitude/phase at probe frequencies.
 
-**Design pipeline and verification**: designs are produced in `iir_design.rs`, a line-by-line port of SciPy's `iirfilter` (analog prototype → `lp2*_zpk` → `bilinear_zpk` → `zpk2sos` with `'nearest'` pairing, using SciPy's internal `fs = 2` normalisation), so section coefficients agree with SciPy to ~1e-12. `tests/filter_reference.rs` enforces this against golden fixtures generated by `tests/reference/generate_filter_fixtures.py` from SciPy, FFmpeg `af_biquads`, DSPFilters and liquid-dsp (see `tests/reference/README.md`); the `pre-commit` hooks run it whenever filter code changes.
+**Design pipeline and verification**: designs are produced in `iir_design.rs` by the classical route: analog prototype → frequency transform (`lp2*_zpk`) → bilinear transform (`bilinear_zpk`) → second-order sections (`zpk2sos`, pairing each pole with its nearest zero), with the analog design normalised to `fs = 2`. `tests/filter_reference.rs` checks the section coefficients to about 1e-12 against golden fixtures generated by `tests/reference/generate_filter_fixtures.py` (sources in `tests/reference/README.md`); the `pre-commit` hooks run it whenever filter code changes.
 
 #### `AudioParametricEq` (parametric_eq.rs)
 
@@ -585,9 +585,9 @@ let resampled = audio.resample(sample_rate!(48000), ResamplingQuality::High)?;
 - `Medium`: Kaiser-windowed sinc, balanced quality and performance
 - `High`: Kaiser-windowed sinc with its pass band to 0.913 of the lower Nyquist frequency and 125 dB of stop-band attenuation
 
-### librosa-compatible analysis
+### Frame-wise analysis
 
-A second family of traits reproduces librosa 1.0 so that librosa pipelines can be ported one-to-one and their results compared numerically. They sit next to the older traits, which keep their own conventions (for example `AudioTransforms::mfcc` and the scalar `AudioStatistics::spectral_centroid` give different values from their librosa-compatible counterparts). [LIBROSA_MIGRATION.md](LIBROSA_MIGRATION.md) maps every librosa function to its counterpart and lists every difference; it is also rendered on docs.rs as the `librosa_migration` module.
+A second family of traits covers frame-wise spectral analysis, rhythm, tonal features, pitch tracking and audio effects, with configs that expose every parameter. They follow their own conventions, which differ from the general-purpose traits above (for example `AudioTransforms::mfcc` and the scalar `AudioStatistics::spectral_centroid` give different values from `AudioSpectrum::mfcc_frames` and `AudioFeatures::spectral_centroid_frames`). The configs have `librosa()` presets, and [LIBROSA_MIGRATION.md](LIBROSA_MIGRATION.md) maps each librosa function to its counterpart and lists every difference; it is also rendered on docs.rs as the `librosa_migration` module.
 
 **Shared conventions**:
 
@@ -601,7 +601,7 @@ A second family of traits reproduces librosa 1.0 so that librosa pipelines can b
 **Modules**:
 
 - `spectrum.rs` (`AudioSpectrum`, `transforms`): periodic-window STFT/ISTFT with every padding mode and `win_length`, `power_to_db` / `amplitude_to_db` with `ref` / `amin` / `top_db`, mel spectrogram, MFCC (DCT types I-III, ortho, lifter), `delta`, `stack_memory`, `frame`. It uses `realfft` directly with a thread-local planner, not the `spectrograms` crate (whose windows are symmetric).
-- `filterbanks.rs` (`transforms`): SciPy windows (`Window`, `get_window`, periodic or symmetric), `window_sumsquare`, `window_bandwidth`, and the Slaney/HTK mel filterbank (`mel_filterbank`).
+- `filterbanks.rs` (`transforms`): window functions (`Window`, `get_window`, periodic or symmetric), `window_sumsquare`, `window_bandwidth`, and the Slaney/HTK mel filterbank (`mel_filterbank`).
 - `features.rs` (`AudioFeatures`, `feature-extraction`): spectral centroid, bandwidth, contrast, flatness, rolloff, polynomial features, RMS, zero-crossing rate (all `*_frames`), the reassigned spectrogram, PCEN, and the A/B/C/D/Z frequency weightings and perceptual weighting.
 - `tonal.rs` (`AudioTonal`, `feature-extraction`): `chroma_stft`, the chroma filterbank, `piptrack`, tuning estimation (`estimate_tuning`, `pitch_tuning`) and `normalize_array`.
 - `constant_q.rs` (`AudioConstantQ`, `transforms` + `resampling`): the recursive per-octave CQT and VQT, pseudo- and hybrid CQT, iCQT, `griffinlim_cqt`, CQT/VQT chroma, CENS and tonnetz, plus `wavelet` / `wavelet_lengths` / `cq_to_chroma`. The octave decimation uses the crate's resampler.
@@ -613,10 +613,10 @@ A second family of traits reproduces librosa 1.0 so that librosa pipelines can b
 
 ### Reference test suites
 
-Two golden-fixture suites pin the numerical behaviour to reference implementations:
+Two golden-fixture suites pin the numerical behaviour to reference values:
 
-- `tests/filter_reference.rs`: IIR designs and filtering against SciPy, DSPFilters, liquid-dsp and FFmpeg (fixtures from `tests/reference/generate_filter_fixtures.py`).
-- `tests/analysis_reference/` (one module per area): the librosa-compatible API against librosa 1.0.0. The generator `tests/reference/analysis/generate_analysis_fixtures.py` is a `uv` project pinning librosa, NumPy, SciPy and soxr; it builds deterministic signals (`tests/fixtures/analysis/signals.json`) and writes one fixture per area to `tests/fixtures/analysis/<area>.json`. Every tolerance in the Rust tests carries a comment naming its error source (FFT butterfly order, summation order, the `float32` librosa bases, or the soxr resampler, which is compared by SNR). Discrete outputs (onsets, beats, paths, tempi) must match exactly.
+- `tests/filter_reference.rs`: IIR designs and filtering (fixtures from `tests/reference/generate_filter_fixtures.py`; `tests/reference/README.md` lists the reference implementations).
+- `tests/analysis_reference/` (one module per area): the frame-wise analysis API. The generator `tests/reference/analysis/generate_analysis_fixtures.py` is a `uv` project with pinned dependencies (see its README); it builds deterministic signals (`tests/fixtures/analysis/signals.json`) and writes one fixture per area to `tests/fixtures/analysis/<area>.json`. Every tolerance in the Rust tests carries a comment naming its error source (FFT butterfly order, summation order, single-precision reference bases, or a different resampler, which is compared by SNR). Discrete outputs (onsets, beats, paths, tempi) must match exactly.
 
 Run with `cargo test --release --features full_no_plotting --test analysis_reference` (`-- --nocapture` prints the measured errors). `pre-commit` runs the suite when the covered code or fixtures change, and checks the fixtures against the generator when either changes.
 

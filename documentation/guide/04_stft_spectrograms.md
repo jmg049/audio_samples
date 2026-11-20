@@ -329,9 +329,9 @@ assert!((s.data()[[0, last]] - peak + 142.13).abs() < 0.01);
 
 ## Common pitfalls
 
-* Centring pads with **zeros**. `torch.stft` defaults to reflection, so its
-  first and last frames differ.
-* The window is the **symmetric** Hann; SciPy uses the periodic one by
+* Centring pads with **zeros**. Tools that pad by reflection give different
+  first and last frames.
+* The window is the **symmetric** Hann; many tools use the periodic one by
   default. Values differ slightly unless both use the same window.
 * dB values are **re 1** with an absolute floor; there is no `top_db`.
   Subtract the maximum to get "dB below peak".

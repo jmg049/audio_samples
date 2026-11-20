@@ -20,7 +20,7 @@ filter, $G$ a gain, $p$ the model order and $a_k$ the (dimensionless) predictor
 coefficients. The usual choice of gain is $G = \sqrt{E_p}$, the square root of
 the order-$p$ prediction-error energy defined below, so that the model driven
 by a unit-energy excitation has the frame's residual energy. This crate writes
-$A(z)$ with a **plus** sign, as MATLAB does; many textbooks predict
+$A(z)$ with a **plus** sign (the prediction-error filter); many textbooks predict
 $\hat{x}[n] = \sum_k \alpha_k x[n-k]$ instead, so $\alpha_k = -a_k$.
 
 **Formants as poles.** One formant at frequency $F$ (Hz) with 3 dB bandwidth $B$
@@ -477,7 +477,7 @@ assert!((q(44_100.0) - 46.1).abs() < 1e-9);
 
 ## Common pitfalls
 
-- **Sign convention.** The crate (like MATLAB) stores $A(z)$
+- **Sign convention.** The crate stores $A(z)$
   coefficients, $e[n] = x[n] + \sum a_k x[n-k]$; the "predictor" form uses
   $-a_k$.
 - **Two LPC routines.** `lpc_analysis` applies a Hamming window, the

@@ -14,8 +14,8 @@
 
 ## Overview
 
-Most audio libraries represent audio as a bare buffer. In Python it is a NumPy
-array whose `dtype` is explicit but whose meaning is not: the sample rate,
+Most audio libraries represent audio as a bare buffer. In Python it is usually
+an array whose `dtype` is explicit but whose meaning is not: the sample rate,
 amplitude range, channel layout, and interleaving are stored elsewhere, if they
 are tracked at all. Rust libraries provide fast, safe primitives, but the caller
 still manages the raw buffer, writes the conversions, and keeps track of those
@@ -179,7 +179,7 @@ dependencies. Enable the rest as needed.
 | `processing`    | Normalization, scaling, clipping, DC-offset removal (requires `statistics`)           |
 | `editing`       | Trim, pad, reverse, fade, concatenate, perturb (requires `statistics`, `random-generation`) |
 | `channels`      | Interleave/deinterleave, mono/stereo conversion, channel extraction                   |
-| `iir-filtering` | Butterworth, Chebyshev I and II, Elliptic (Cauer), and Bessel filters; low-, high-, band-pass and band-stop responses; zero-phase `filtfilt`; design-once streaming `SosFilter`. Designs and outputs match `scipy.signal` (verified by `tests/filter_reference.rs`) |
+| `iir-filtering` | Butterworth, Chebyshev I and II, Elliptic (Cauer), and Bessel filters; low-, high-, band-pass and band-stop responses; zero-phase `filtfilt`; design-once streaming `SosFilter`. Designs and outputs are checked against golden reference fixtures (`tests/filter_reference.rs`) |
 | `parametric-eq` | Parametric EQ bands and `ThreeBandEqConfig` (requires `iir-filtering`)                 |
 | `dynamic-range` | Compression, limiting, gating, expansion via config structs, with side-chain support  |
 | `envelopes`     | Amplitude, RMS, and attack-decay envelope followers                                   |
@@ -262,8 +262,8 @@ The crate is also teaching material for a speech and audio processing course:
   [Python bindings](https://github.com/jmg049/audio_samples_python)
   (`docs/source/tutorials/`).
 - **For instructors**: [documentation/guide/FOR_INSTRUCTORS.md](documentation/guide/FOR_INSTRUCTORS.md)
-  covers lab sizing, conventions that differ from SciPy and other references, and
-  known limitations.
+  covers lab sizing, conventions that differ from other references, and known
+  limitations.
 
 ---
 

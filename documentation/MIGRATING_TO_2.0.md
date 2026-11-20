@@ -60,7 +60,7 @@ pub fn into_data_borrowed(self) -> AudioData<'a, T>;
 
 ## 2. Dual in-place / borrowing operation variants
 
-This is the largest change. Every Category-1 transforming operation now exists
+This is the largest change. Every transforming operation now exists
 in two forms with a fixed naming rule:
 
 - The **unmarked name** is **non-mutating**: `op(&self, ..) -> Result<Self>`
@@ -395,7 +395,7 @@ impl core::str::FromStr for SampleType { type Err = EnumParseError; /* ... */ }
 
 ## 8. Explicitly NOT changed
 
-To prevent confusion, these were considered but deliberately left as-is:
+Two items that might look like breaking changes are not:
 
 - **`NdResult` is retained.** It is the canonical return for analysis ops whose
   dimensionality tracks the input layout (1D for mono, 2D for multi-channel).

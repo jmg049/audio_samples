@@ -60,9 +60,9 @@ non-empty-slice = "0.6"   # NonEmptySlice / NonEmptyVec arguments
 `audio_samples` does not re-export these crates, so they must be listed
 explicitly, with compatible versions: the `StftParams` you pass to `stft`, for
 example, must come from the same `spectrograms` release that `audio_samples`
-uses. The guide and the `educational` feature are new; if the `audio_samples`
-release on crates.io does not have them yet, use a path dependency on a
-checkout of this repository instead
+uses. If the `audio_samples` release on crates.io does not include the guide
+and the `educational` feature, use a path dependency on a checkout of this
+repository instead
 (`audio_samples = { path = "../audio_samples", features = [...] }`).
 
 The guide's signals are all generated in code. To analyse your own

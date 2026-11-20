@@ -56,8 +56,8 @@ substituting
 $$s = K \frac{1 - z^{-1}}{1 + z^{-1}}$$
 
 where $K$ is a positive constant (rad/s). The usual choice is $K = 2 f_s$;
-the library follows SciPy's internal normalisation, and every choice of $K$
-gives the same $H(z)$ once the cutoff is pre-warped. The substitution maps the
+the library designs with $f_s$ normalised to 2 (so $K = 4$), and every choice
+of $K$ gives the same $H(z)$ once the cutoff is pre-warped. The substitution maps the
 whole $j\Omega$ axis onto the unit circle, with $\Omega = K \tan(\omega / 2)$,
 so frequencies are compressed near Nyquist. To place the digital cutoff exactly
 at $f_c$ (Hz) the analogue cutoff is **pre-warped**:
@@ -77,7 +77,7 @@ $H(z)$ into a cascade of biquads,
 $$H(z) = \prod_{i=1}^{S} \frac{b_{0i} + b_{1i} z^{-1} + b_{2i} z^{-2}}{1 + a_{1i} z^{-1} + a_{2i} z^{-2}}$$
 
 where $S = \lceil N/2 \rceil$ is the number of sections and each row is
-stored in SciPy layout `[b0, b1, b2, a0, a1, a2]` with `a0 = 1`.
+stored as a row `[b0, b1, b2, a0, a1, a2]` with `a0 = 1`.
 
 **Chebyshev type I** gives a steeper roll-off than Butterworth at the cost of
 ripple in the pass band. Its analogue magnitude is
@@ -99,10 +99,11 @@ pre-warping turns $\Omega/\Omega_c$ into $\tan(\pi f/f_s)/\tan(\pi f_c/f_s)$.
 twice the attenuation in dB (so $-6.02$ dB at a Butterworth cutoff), and a
 non-causal filter (it needs the whole signal).
 
-The library's design pipeline (`src/operations/iir_design.rs`) is a port of
-SciPy's `iirfilter` → prototype → `lp2lp_zpk` → `bilinear_zpk` → `zpk2sos`, and
+The library's design pipeline (`src/operations/iir_design.rs`) runs these
+steps in order: analogue prototype → frequency transform (`lp2lp_zpk` and its
+high-pass and band variants) → `bilinear_zpk` → `zpk2sos`, and
 `tests/filter_reference.rs` checks its coefficients and responses against
-SciPy golden fixtures.
+golden reference fixtures.
 
 ## With the library
 
@@ -145,9 +146,9 @@ bilinear transform compresses the frequency axis towards Nyquist.
 
 Apply it to a signal with
 [`AudioIirFiltering::apply_iir_filter`](crate::AudioIirFiltering::apply_iir_filter)
-(causal, like `scipy.signal.sosfilt`) or
+(causal) or
 [`AudioIirFiltering::filtfilt`](crate::AudioIirFiltering::filtfilt)
-(zero phase, like `sosfiltfilt`). For a 1 kHz tone the causal filter attenuates
+(zero phase). For a 1 kHz tone the causal filter attenuates
 by 3.01 dB and shifts the tone by half a period, 8 samples (a 4th-order
 Butterworth has $-180°$ of phase at its cutoff); `filtfilt` attenuates by
 6.02 dB and does not delay. Half a period is the **phase delay**
@@ -504,16 +505,15 @@ assert!((20.0 * peak.log10() + 51.0).abs() < 0.1);
 
 ## Common pitfalls
 
-- **Cutoff conventions.** Here (as in SciPy) the cutoff is the $-3.01$ dB
+- **Cutoff conventions.** Here the cutoff is the $-3.01$ dB
   point for Butterworth, the $-r_p$ point for Chebyshev I and the start of the
   stop band for Chebyshev II. Some textbooks quote the Chebyshev $-3$ dB
   frequency instead.
-- **Frequencies are in Hz.** SciPy's `butter(N, Wn)` without `fs` expects
-  $W_n$ as a fraction of Nyquist; this library always takes Hz and a sample
-  rate.
-- **Never cascade a high-order filter as one polynomial.** Use the SOS rows;
-  `[b0, b1, b2, a0, a1, a2]` is SciPy's layout, while some tools (e.g. MATLAB's
-  `sos` with a separate gain `g`) normalise differently.
+- **Frequencies are in Hz.** Some design routines expect the cutoff as a
+  fraction of Nyquist; this library always takes Hz and a sample rate.
+- **Never cascade a high-order filter as one polynomial.** Use the SOS rows.
+  Each row is `[b0, b1, b2, a0, a1, a2]` with the overall gain folded into the
+  sections; tools that keep a separate gain `g` normalise differently.
 - **`filtfilt` doubles the attenuation in dB** and is non-causal; use it for
   offline analysis, not real-time processing.
 - **Low cutoffs at high sample rates** put poles close to $z = 1$, which causes
@@ -527,7 +527,7 @@ assert!((20.0 * peak.log10() + 51.0).abs() < 0.1);
 
 - A. V. Oppenheim and R. W. Schafer, *Discrete-Time Signal Processing*, 3rd ed., Pearson, 2010. The bilinear transform, Butterworth and Chebyshev design.
 - R. Bristow-Johnson, *Cookbook formulae for audio equalizer biquad filter coefficients* (the "Audio EQ Cookbook"). The notch (band-stop) biquad used above.
-- P. Virtanen et al., "SciPy 1.0: fundamental algorithms for scientific computing in Python", *Nature Methods* 17, 261-272, 2020. The `iirfilter` design pipeline the library ports.
+- P. Virtanen et al., "SciPy 1.0: fundamental algorithms for scientific computing in Python", *Nature Methods* 17, 261-272, 2020. Describes the `iirfilter` design pipeline (prototype, frequency transform, bilinear transform, second-order sections) used in this chapter.
 
 ## See also
 

@@ -390,8 +390,8 @@ assert!((factor - 24.91).abs() < 0.005);
   $\sqrt{M}$ / $\sqrt{M/2}$ to compare.
 - **Absolute log floor.** The dB step clamps at $10^{-8}$ (-80 dB re 1), not
   80 dB below the frame's peak, so a quiet signal's MFCCs depend on its level.
-- **Symmetric Hann.** `WindowType::Hanning` is the symmetric window; SciPy
-  uses the periodic one by default, so spectra differ slightly.
+- **Symmetric Hann.** `WindowType::Hanning` is the symmetric window; many
+  tools use the periodic one by default, so spectra differ slightly.
 - **Empty mel bands** appear when bands are narrower than the FFT bin spacing:
   ask `MelParams::explain_with` with the FFT size before choosing `n_mels`.
 - **Cepstral pitch needs several periods in the frame** and fails on breathy
