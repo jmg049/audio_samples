@@ -1,5 +1,5 @@
-//! The short `Display` form of multi-channel audio iterates over the channels
-//! and does not panic for buffers with more samples than channels.
+//! The alternate `Display` form of multi-channel audio iterates over the
+//! channels and does not panic for buffers with more samples than channels.
 
 use audio_samples::{AudioSamples, sample_rate};
 use ndarray::array;
@@ -11,10 +11,16 @@ fn multichannel_display_lists_each_channel_once() {
         sample_rate!(16000),
     )
     .unwrap();
-    let text = format!("{audio}");
-    assert!(text.contains("Ch 0:"), "{text}");
-    assert!(text.contains("Ch 1:"), "{text}");
-    assert!(!text.contains("Ch 2:"), "{text}");
+    let text = format!("{audio:#}");
+    assert!(text.contains("ch 0:"), "{text}");
+    assert!(text.contains("ch 1:"), "{text}");
+    assert!(!text.contains("ch 2:"), "{text}");
+    let short = format!("{audio}");
+    assert!(
+        short.starts_with("AudioSamples<f32>: 2 ch × 4 samples"),
+        "{short}"
+    );
+    assert!(!short.contains('\n'), "{short}");
 }
 
 #[test]
