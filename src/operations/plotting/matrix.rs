@@ -1,14 +1,14 @@
 //! Interactive plots of feature matrices and simplified waveforms.
 //!
-//! [`plot_matrix`](crate::operations::plotting::matrix::plot_matrix) draws any matrix as a heatmap
+//! [`plot_matrix`] draws any matrix as a heatmap
 //! whose axes know what they show: seconds, lag, Hz, mel, constant-Q bins, note names, pitch
 //! classes, tempo or tonnetz dimensions, with decibel or raw values.
-//! [`plot_waveform_bars`](crate::operations::plotting::matrix::plot_waveform_bars) draws a
+//! [`plot_waveform_bars`] draws a
 //! waveform's envelope as bars, and
-//! [`plot_waveform_f0`](crate::operations::plotting::matrix::plot_waveform_f0) draws it displaced
+//! [`plot_waveform_f0`] draws it displaced
 //! along a pitch track.
 //!
-//! ```no_run
+//! ```rust
 //! use audio_samples::operations::plotting::matrix::{AxisKind, MatrixPlotParams, plot_matrix};
 //! use audio_samples::operations::plotting::PlotUtils;
 //! use ndarray::Array2;
@@ -16,7 +16,7 @@
 //! let chroma = Array2::<f64>::zeros((12, 100));
 //! let params = MatrixPlotParams::new(AxisKind::Time, AxisKind::Chroma);
 //! let plot = plot_matrix(chroma.view(), &params).unwrap();
-//! plot.save("chroma.html").unwrap();
+//! assert!(plot.html().unwrap().contains("<html"));
 //! ```
 
 use std::path::Path;

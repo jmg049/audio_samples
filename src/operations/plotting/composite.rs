@@ -1,3 +1,7 @@
+//! Several plots in one HTML document: [`CompositePlot`] collects plots that
+//! implement [`PlotComponent`] and arranges them vertically, horizontally or in a
+//! grid ([`CompositeLayout`]), for example a waveform above its spectrogram.
+
 use super::PlotUtils;
 use crate::AudioSampleResult;
 use base64::Engine;
@@ -9,7 +13,7 @@ use std::path::Path;
 ///
 /// # Purpose
 /// Defines how individual plot components should be positioned relative to each other when
-/// generating a composite visualization. Controls the flexbox layout direction and grid
+/// generating a composite visualisation. Controls the flexbox layout direction and grid
 /// configuration for the container HTML.
 ///
 /// # Intended Usage
@@ -24,7 +28,7 @@ use std::path::Path;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CompositeLayout {
-    /// Stacks plots vertically (top to bottom). Most common for time-aligned visualizations
+    /// Stacks plots vertically (top to bottom). Most common for time-aligned visualisations
     /// such as waveform above spectrogram.
     Vertical,
     /// Arranges plots horizontally (left to right). Useful for side-by-side comparison of
@@ -44,7 +48,7 @@ pub enum CompositeLayout {
 ///
 /// # Purpose
 /// Provides a common abstraction over different plot types (waveforms, spectrograms, spectra)
-/// to enable combining them into composite visualizations. Allows access to the underlying
+/// to enable combining them into composite visualisations. Allows access to the underlying
 /// Plotly `Plot` object and declares axis-sharing requirements.
 ///
 /// # Intended Usage
@@ -75,12 +79,12 @@ pub trait PlotComponent {
     fn requires_shared_x_axis(&self) -> bool;
 }
 
-/// Multi-plot composition container for arranging multiple visualizations in a single HTML document.
+/// Multi-plot composition container for arranging multiple visualisations in a single HTML document.
 ///
 /// # Purpose
 /// Combines multiple plot components (waveforms, spectrograms, spectra) into a single HTML
 /// file with configurable spatial layout. Each plot is rendered as an independent Plotly
-/// visualization embedded in an iframe within a flexbox container.
+/// visualisation embedded in an iframe within a flexbox container.
 ///
 /// # Intended Usage
 /// Construct via [`CompositePlot::new()`], add plots with [`add_plot`](Self::add_plot), optionally configure
@@ -105,7 +109,7 @@ impl CompositePlot {
     /// Creates a new empty composite plot with vertical layout.
     ///
     /// # Returns
-    /// An empty [`CompositePlot`] instance. Use [`add_plot`](Self::add_plot) to add visualizations.
+    /// An empty [`CompositePlot`] instance. Use [`add_plot`](Self::add_plot) to add visualisations.
     ///
     /// # Example
     /// ```rust,no_run

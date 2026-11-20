@@ -1,3 +1,8 @@
+//! Waveform plots: [`create_waveform_plot`] and [`WaveformPlot`], amplitude against
+//! time for each channel. Overlays (RMS and peak envelopes, zero-crossing and energy
+//! tracks, onset and beat markers, lines and shaded regions) are added by method
+//! chaining.
+
 use std::path::{Path, PathBuf};
 
 use plotly::common::{AxisSide, Marker, Mode};
@@ -22,7 +27,7 @@ use crate::{
 ///
 /// # Purpose
 ///
-/// Encapsulates a rendered Plotly waveform visualization. Provides methods for
+/// Encapsulates a rendered Plotly waveform visualisation. Provides methods for
 /// saving to disk, generating HTML, and adding overlays (RMS/peak envelopes,
 /// onset markers, beat markers, shaded regions).
 ///
@@ -440,7 +445,7 @@ impl WaveformPlot {
     ///
     /// Renders a line trace showing the peak (maximum absolute amplitude) envelope over time.
     /// The peak envelope highlights the loudest instantaneous amplitudes in each window and is
-    /// useful for analyzing dynamic range and detecting clipping risk.
+    /// useful for analysing dynamic range and detecting clipping risk.
     ///
     /// Typically used in conjunction with
     /// [`crate::operations::plotting::dsp_overlays::compute_windowed_peak`] to compute windowed
@@ -635,7 +640,7 @@ impl WaveformPlot {
 
     /// Adds onset markers as vertical lines at the specified times.
     ///
-    /// Renders vertical lines at each onset time, typically used to visualize the output of
+    /// Renders vertical lines at each onset time, typically used to visualise the output of
     /// onset detection algorithms. Onsets mark the beginning of transient events such as note
     /// attacks, percussive hits, or significant spectral changes.
     ///
@@ -683,7 +688,7 @@ impl WaveformPlot {
 
     /// Adds beat markers as vertical lines at the specified times.
     ///
-    /// Renders vertical lines at each beat time, typically used to visualize the output of
+    /// Renders vertical lines at each beat time, typically used to visualise the output of
     /// beat tracking algorithms. Beats mark the perceptual pulse or rhythm of the signal.
     ///
     /// Internally calls [`add_vline`](Self::add_vline) for each beat time.

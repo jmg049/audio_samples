@@ -1,4 +1,4 @@
-//! Lissajous (stereo X-Y) visualization.
+//! Lissajous (stereo X-Y) plots.
 //!
 //! Scatters channel 0 (x) against channel 1 (y) of a 2-channel signal. This is
 //! the standard goniometer / vectorscope view used to inspect stereo width and
@@ -98,7 +98,7 @@ impl LissajousParams {
 ///
 /// # Purpose
 /// Encapsulates a rendered Plotly scatter plot of channel 0 (x) against channel
-/// 1 (y), used for stereo correlation / phase visualization.
+/// 1 (y), used for stereo correlation / phase visualisation.
 ///
 /// # Intended Usage
 /// Created via [`create_lissajous_plot`] or through the
@@ -229,10 +229,10 @@ impl PlotComponent for LissajousPlot {
 /// Creates an interactive Lissajous (stereo X-Y) plot from a 2-channel signal.
 ///
 /// Scatters channel 0 (x) against channel 1 (y). This is the standard stereo
-/// correlation / phase visualization (a goniometer / vectorscope).
+/// correlation / phase visualisation (a goniometer / vectorscope).
 ///
 /// # Arguments
-/// * `audio` - The audio data to analyze. Must have **exactly two channels**.
+/// * `audio` - The audio data to analyse. Must have **exactly two channels**.
 /// * `params` - Configuration controlling the point cap and plot styling.
 ///
 /// # Returns

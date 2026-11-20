@@ -1,4 +1,4 @@
-//! Phase spectrum visualization.
+//! Phase spectrum plots.
 //!
 //! Mirrors [`super::spectrum`] but plots the per-bin phase angle
 //! (`Complex::arg()`, in radians) on the y-axis instead of magnitude. Phase is
@@ -20,7 +20,7 @@ use crate::{AudioSampleResult, AudioSamples, StandardSample};
 /// Configuration parameters for phase spectrum plot generation.
 ///
 /// # Purpose
-/// Encapsulates the settings required to compute and visualize a phase spectrum
+/// Encapsulates the settings required to compute and visualise a phase spectrum
 /// from audio samples: FFT size, optional phase unwrapping, frequency-range
 /// filtering, and shared plot styling.
 ///
@@ -275,7 +275,7 @@ impl PlotComponent for PhaseSpectrumPlot {
 /// line plot. Supports frequency-range filtering and automatic FFT size selection.
 ///
 /// # Arguments
-/// * `audio` - The audio data to analyze. Multi-channel audio is converted to
+/// * `audio` - The audio data to analyse. Multi-channel audio is converted to
 ///   mono by averaging all channels.
 /// * `params` - Configuration controlling FFT size, unwrapping, frequency range,
 ///   and plot styling.
