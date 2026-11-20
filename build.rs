@@ -8,8 +8,16 @@
 //! with links between chapters (`02_quantisation_dither.md`, which work in a
 //! Markdown viewer and in the book) turned into intra-doc links
 //! (`crate::guide::c02_quantisation_dither`).
-//! `src/guide.rs` includes those copies. Nothing is done unless the `guide`
-//! module is being built (features `educational` and `full_no_plotting`).
+//! `src/guide.rs` includes those copies. Nothing is done for the guide unless
+//! the `guide` module is being built (features `educational` and
+//! `full_no_plotting`).
+//!
+//! The two librosa migration documents (`documentation/LIBROSA_MIGRATION.md` and
+//! `documentation/MOVING_FROM_LIBROSA_RUST.md`) link to each other by file name,
+//! which works on GitHub. With `full_no_plotting` this script writes copies to
+//! `$OUT_DIR/migration/` with those links turned into intra-doc links to the
+//! modules that render them (`crate::librosa_migration`,
+//! `crate::moving_from_librosa_rust`), and `src/lib.rs` includes the copies.
 
 #[path = "build_support/rustdoc_math.rs"]
 #[allow(dead_code)]
@@ -23,9 +31,11 @@ fn main() {
     println!("cargo:rerun-if-changed=build_support/rustdoc_math.rs");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_EDUCATIONAL");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_FULL_NO_PLOTTING");
-    if env::var_os("CARGO_FEATURE_EDUCATIONAL").is_none()
-        || env::var_os("CARGO_FEATURE_FULL_NO_PLOTTING").is_none()
-    {
+    if env::var_os("CARGO_FEATURE_FULL_NO_PLOTTING").is_none() {
+        return;
+    }
+    migration_docs();
+    if env::var_os("CARGO_FEATURE_EDUCATIONAL").is_none() {
         return;
     }
 
@@ -69,6 +79,35 @@ fn main() {
         }
         let name = path.file_name().expect("file name");
         fs::write(out_dir.join(name), escaped)
+            .unwrap_or_else(|e| panic!("write {}: {e}", out_dir.display()));
+    }
+}
+
+/// The migration documents and the modules that render them.
+const MIGRATION_DOCS: [(&str, &str); 2] = [
+    ("LIBROSA_MIGRATION.md", "crate::librosa_migration"),
+    (
+        "MOVING_FROM_LIBROSA_RUST.md",
+        "crate::moving_from_librosa_rust",
+    ),
+];
+
+/// Writes the migration documents to `$OUT_DIR/migration/` with the links
+/// between them pointing at their rustdoc modules.
+fn migration_docs() {
+    let src_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+        .join("documentation");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("migration");
+    fs::create_dir_all(&out_dir).expect("create $OUT_DIR/migration");
+    for (file, _) in MIGRATION_DOCS {
+        let path = src_dir.join(file);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let mut text =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        for (target, module) in MIGRATION_DOCS {
+            text = text.replace(&format!("]({target}"), &format!("]({module}"));
+        }
+        fs::write(out_dir.join(file), text)
             .unwrap_or_else(|e| panic!("write {}: {e}", out_dir.display()));
     }
 }

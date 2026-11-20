@@ -737,17 +737,18 @@ pub mod simd_conversions;
 pub mod educational;
 
 // Documentation only: renders documentation/LIBROSA_MIGRATION.md and runs its
-// examples as doctests. The module has no items.
+// examples as doctests. The module has no items. build.rs writes the copy with
+// the links to the other migration document turned into intra-doc links.
 #[cfg(all(feature = "full_no_plotting", any(doc, doctest)))]
 pub mod librosa_migration {
-    #![doc = include_str!("../documentation/LIBROSA_MIGRATION.md")]
+    #![doc = include_str!(concat!(env!("OUT_DIR"), "/migration/LIBROSA_MIGRATION.md"))]
 }
 
 // Documentation only: renders documentation/MOVING_FROM_LIBROSA_RUST.md and runs
 // its examples as doctests. The module has no items.
 #[cfg(all(feature = "full_no_plotting", any(doc, doctest)))]
 pub mod moving_from_librosa_rust {
-    #![doc = include_str!("../documentation/MOVING_FROM_LIBROSA_RUST.md")]
+    #![doc = include_str!(concat!(env!("OUT_DIR"), "/migration/MOVING_FROM_LIBROSA_RUST.md"))]
 }
 
 #[cfg(all(feature = "educational", feature = "full_no_plotting"))]

@@ -389,6 +389,9 @@ The librosa-compatible API is unreleased, so these are changes to the
 
 ### Fixed
 
+- **The links between the two librosa migration documents work on docs.rs.** The
+  `librosa_migration` and `moving_from_librosa_rust` pages linked to each other by file name,
+  which only works on GitHub; the rendered pages now link to each other's module.
 - **`LimiterConfig::isp_limiting` detects true peaks.** The flag was accepted but ignored. When
   set, the limiter's peak detector reads the true (inter-sample) peak of its detector signal,
   interpolated at 4× (12-tap Kaiser-windowed sinc phases, as in ITU-R BS.1770), instead of the
