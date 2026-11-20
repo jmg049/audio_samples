@@ -1031,72 +1031,111 @@ impl<F: AudioFloat> NnlsSolver<F> {
     /// [`ParameterError`] if `b` has the wrong number of rows or is not finite.
     pub fn solve(&self, b: ArrayView2<'_, F>) -> AudioSampleResult<Array2<F>> {
         let m = self.pseudo_inverse.ncols();
-        let n = self.norms.len();
         if b.nrows() != m {
             return invalid("b", format!("{} rows for a matrix of {m} rows", b.nrows()));
         }
         if b.iter().any(|v| !v.is_finite()) {
             return invalid("b", "must be finite");
         }
-        let (pointers, rows, values, norms) =
-            (&self.pointers, &self.rows, &self.values, &self.norms);
         let mut x = self.pseudo_inverse.dot(&b);
         x.mapv_inplace(|v| if v > F::zero() { v } else { F::zero() });
         let tol = of::<F>(self.config.tol);
-        let mut residual = vec![F::zero(); m];
         let peak_all = b.iter().fold(F::zero(), |p, &v| p.max(v.abs()));
         let floor = F::min_positive_value() + peak_all * F::epsilon();
-        for c in 0..b.ncols() {
-            let target = b.column(c);
-            let mut xc = x.column_mut(c);
-            for (r, &v) in residual.iter_mut().zip(target.iter()) {
-                *r = v;
-            }
-            let mut peak = F::zero();
-            for &v in target.iter() {
-                peak = peak.max(v.abs());
-            }
-            for (j, &v) in xc.iter().enumerate() {
-                if v != F::zero() {
-                    for k in pointers[j]..pointers[j + 1] {
-                        let r = rows[k] as usize;
-                        residual[r] -= values[k] * v;
-                    }
-                }
-            }
-            let limit = (tol * peak).max(floor);
-            for _ in 0..self.config.max_iter {
-                let mut largest = F::zero();
-                for j in 0..n {
-                    if norms[j] == F::zero() {
-                        continue;
-                    }
-                    let mut grad = F::zero();
-                    for k in pointers[j]..pointers[j + 1] {
-                        grad += values[k] * residual[rows[k] as usize];
-                    }
-                    let old = xc[j];
-                    let new = old + grad / norms[j];
-                    let new = if new > F::zero() { new } else { F::zero() };
-                    let delta = new - old;
-                    if delta != F::zero() {
-                        xc[j] = new;
-                        for k in pointers[j]..pointers[j + 1] {
-                            let r = rows[k] as usize;
-                            residual[r] -= values[k] * delta;
-                        }
-                        let change = delta.abs() * norms[j].sqrt();
-                        if change > largest {
-                            largest = change;
-                        }
-                    }
-                }
-                if largest <= limit {
-                    break;
+        let cols = Columns {
+            pointers: &self.pointers,
+            rows: &self.rows,
+            values: &self.values,
+            norms: &self.norms,
+        };
+        let max_iter = self.config.max_iter;
+        descend(&cols, b, &mut x, tol, floor, max_iter);
+        Ok(x)
+    }
+}
+
+/// The compressed columns of an [`NnlsSolver`]'s matrix.
+struct Columns<'a, F> {
+    pointers: &'a [usize],
+    rows: &'a [u32],
+    values: &'a [F],
+    norms: &'a [F],
+}
+
+/// Coordinate descent from the start `x` for each column of `b`, until no
+/// coefficient changes the fit by more than `tol` of the column's peak (and
+/// `floor`), or after `max_iter` sweeps.
+fn descend<F: AudioFloat>(
+    cols: &Columns<'_, F>,
+    b: ArrayView2<'_, F>,
+    x: &mut Array2<F>,
+    tol: F,
+    floor: F,
+    max_iter: usize,
+) {
+    let (pointers, rows, values, norms) = (cols.pointers, cols.rows, cols.values, cols.norms);
+    // The columns with a non-zero norm: index, range in `rows` and `values`,
+    // norm and its square root.
+    let active: Vec<(usize, usize, usize, F, F)> = norms
+        .iter()
+        .enumerate()
+        .filter(|&(_, &norm)| norm != F::zero())
+        .map(|(j, &norm)| (j, pointers[j], pointers[j + 1], norm, norm.sqrt()))
+        .collect();
+    let mut residual = vec![F::zero(); b.nrows()];
+    // The column of `x` being solved, contiguous (a column of `x` has one
+    // value per row of a row-major array, each in a cache line of its own).
+    let mut xs = vec![F::zero(); norms.len()];
+    for (c, target) in b.columns().into_iter().enumerate() {
+        for (d, &v) in xs.iter_mut().zip(x.column(c)) {
+            *d = v;
+        }
+        for (r, &v) in residual.iter_mut().zip(target.iter()) {
+            *r = v;
+        }
+        let mut peak = F::zero();
+        for &v in target.iter() {
+            peak = peak.max(v.abs());
+        }
+        for (j, &v) in xs.iter().enumerate() {
+            if v != F::zero() {
+                let span = pointers[j]..pointers[j + 1];
+                for (&r, &a) in rows[span.clone()].iter().zip(&values[span]) {
+                    residual[r as usize] -= a * v;
                 }
             }
         }
-        Ok(x)
+        let limit = (tol * peak).max(floor);
+        for _ in 0..max_iter {
+            let mut largest = F::zero();
+            for &(j, lo, hi, norm, root) in &active {
+                let (col_rows, col_values) = (&rows[lo..hi], &values[lo..hi]);
+                let mut grad = F::zero();
+                for (&r, &a) in col_rows.iter().zip(col_values) {
+                    grad += a * residual[r as usize];
+                }
+                let old = xs[j];
+                let new = old + grad / norm;
+                let new = if new > F::zero() { new } else { F::zero() };
+                let delta = new - old;
+                if delta != F::zero() {
+                    xs[j] = new;
+                    for (&r, &a) in col_rows.iter().zip(col_values) {
+                        residual[r as usize] -= a * delta;
+                    }
+                    let change = delta.abs() * root;
+                    if change > largest {
+                        largest = change;
+                    }
+                }
+            }
+            if largest <= limit {
+                break;
+            }
+        }
+        for (d, &v) in x.column_mut(c).iter_mut().zip(&xs) {
+            *d = v;
+        }
     }
 }
 
