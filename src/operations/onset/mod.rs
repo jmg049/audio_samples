@@ -1112,14 +1112,30 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```
     /// use audio_samples::{AudioSamples, sample_rate};
     /// use audio_samples::operations::traits::AudioOnsetDetection;
     /// use audio_samples::operations::onset::OnsetDetectionConfig;
+    /// use ndarray::Array1;
     ///
-    /// let audio = AudioSamples::new_mono(&[0.0f32; 44100], sample_rate!(44100))?;
-    /// let config = OnsetDetectionConfig::percussive();
-    /// let onset_times = audio.detect_onsets(&config)?;
+    /// // Clicks (decaying 3 kHz bursts) at 0.25, 0.75, 1.25 and 1.75 s.
+    /// let sr = 44_100;
+    /// let mut x = vec![0.0f64; 2 * sr];
+    /// for k in 0..4 {
+    ///     let start = sr / 4 + k * sr / 2;
+    ///     for i in 0..512 {
+    ///         x[start + i] = 0.9 * (-(i as f64) / 48.0).exp() * (0.43 * i as f64).sin();
+    ///     }
+    /// }
+    /// let audio = AudioSamples::new_mono(Array1::from_vec(x), sample_rate!(44100)).unwrap();
+    ///
+    /// let config = OnsetDetectionConfig::musical(audio.sample_rate());
+    /// let onset_times = audio.detect_onsets(&config).unwrap();
+    /// assert_eq!(onset_times.len(), 4);
+    /// // The long low-frequency CQT kernels see each click a few frames early.
+    /// for (k, t) in onset_times.iter().enumerate() {
+    ///     assert!((t - (0.25 + 0.5 * k as f64)).abs() < 0.06);
+    /// }
     /// ```
     #[inline]
     fn detect_onsets(&self, config: &OnsetDetectionConfig) -> AudioSampleResult<Vec<f64>> {
@@ -1211,14 +1227,30 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```
     /// use audio_samples::{AudioSamples, sample_rate};
     /// use audio_samples::operations::traits::AudioOnsetDetection;
     /// use audio_samples::operations::onset::SpectralFluxConfig;
+    /// use ndarray::Array1;
     ///
-    /// let audio = AudioSamples::new_mono(&[0.0f32; 44100], sample_rate!(44100))?;
-    /// let config = SpectralFluxConfig::musical();
-    /// let onset_times = audio.detect_onsets_spectral_flux(&config)?;
+    /// // Clicks (decaying 3 kHz bursts) at 0.25, 0.75, 1.25 and 1.75 s.
+    /// let sr = 44_100;
+    /// let mut x = vec![0.0f64; 2 * sr];
+    /// for k in 0..4 {
+    ///     let start = sr / 4 + k * sr / 2;
+    ///     for i in 0..512 {
+    ///         x[start + i] = 0.9 * (-(i as f64) / 48.0).exp() * (0.43 * i as f64).sin();
+    ///     }
+    /// }
+    /// let audio = AudioSamples::new_mono(Array1::from_vec(x), sample_rate!(44100)).unwrap();
+    ///
+    /// let config = SpectralFluxConfig::musical(audio.sample_rate());
+    /// let onset_times = audio.detect_onsets_spectral_flux(&config).unwrap();
+    /// assert_eq!(onset_times.len(), 4);
+    /// // The long low-frequency CQT kernels see each click a few frames early.
+    /// for (k, t) in onset_times.iter().enumerate() {
+    ///     assert!((t - (0.25 + 0.5 * k as f64)).abs() < 0.06);
+    /// }
     /// ```
     #[inline]
     fn detect_onsets_spectral_flux(
@@ -1356,14 +1388,27 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```
     /// use audio_samples::{AudioSamples, sample_rate};
     /// use audio_samples::operations::traits::AudioOnsetDetection;
     /// use audio_samples::operations::onset::ComplexOnsetConfig;
+    /// use ndarray::Array1;
     ///
-    /// let audio = AudioSamples::new_mono(&[0.0f32; 44100], sample_rate!(44100))?;
-    /// let config = ComplexOnsetConfig::musical();
-    /// let onset_times = audio.complex_onset_detection(&config)?;
+    /// // Clicks (decaying 3 kHz bursts) at 0.25, 0.75, 1.25 and 1.75 s.
+    /// let sr = 44_100;
+    /// let mut x = vec![0.0f64; 2 * sr];
+    /// for k in 0..4 {
+    ///     let start = sr / 4 + k * sr / 2;
+    ///     for i in 0..512 {
+    ///         x[start + i] = 0.9 * (-(i as f64) / 48.0).exp() * (0.43 * i as f64).sin();
+    ///     }
+    /// }
+    /// let audio = AudioSamples::new_mono(Array1::from_vec(x), sample_rate!(44100)).unwrap();
+    ///
+    /// let config = ComplexOnsetConfig::musical(audio.sample_rate());
+    /// let onset_times = audio.complex_onset_detection(&config).unwrap();
+    /// assert!(onset_times.windows(2).all(|w| w[0] < w[1]));
+    /// assert!(onset_times.iter().all(|&t| (0.0..2.0).contains(&t)));
     /// ```
     #[inline]
     fn complex_onset_detection(
