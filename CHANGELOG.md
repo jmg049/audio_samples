@@ -573,6 +573,10 @@ odd-length spectral bin spacing, `frequency_to_note` and
 
 ### Changed
 
+- **`NdResult::into_array1_unchecked` and `into_array2_unchecked` are removed.** They were
+  `unsafe` but could not cause undefined behaviour (they panicked on the other variant).
+  Use `into_array1` / `into_array2`, which return `None` for the other variant, or match on
+  the enum.
 - **`FixedSizeAudioSamples` and `FixedSizeMultiChannelAudioSamples` keep their size.** They
   no longer implement `DerefMut` or `AsMut` and have no `samples_mut`, through which an
   in-place operation (trimming, padding, resampling, channel conversion) could leave a buffer

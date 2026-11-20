@@ -995,9 +995,7 @@ pub use resampling::{StreamingResampler, resample, resample_by_ratio, resample_s
 /// ## Intended Usage
 ///
 /// Pattern-match on the variants directly, or use [`into_array1`](NdResult::into_array1) /
-/// [`into_array2`](NdResult::into_array2) when you already know the expected shape.
-/// Prefer the safe helpers over the `_unchecked` variants unless performance is
-/// critical and the shape has already been verified.
+/// [`into_array2`](NdResult::into_array2), which return `None` for the other variant.
 ///
 /// ## Invariants
 ///
@@ -1051,42 +1049,6 @@ where
         }
     }
 
-    /// Extracts the inner 1-D array without checking the variant.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that this `NdResult` is the [`Mono`](NdResult::Mono)
-    /// variant. Calling this on a [`MultiChannel`](NdResult::MultiChannel) value
-    /// panics in every build profile. It cannot cause undefined behaviour.
-    ///
-    /// # Returns
-    ///
-    /// The inner `Array1<T>`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the variant is `MultiChannel`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use audio_samples::NdResult;
-    /// use ndarray::array;
-    ///
-    /// let result: NdResult<f32> = NdResult::Mono(array![0.1, 0.2, 0.3]);
-    /// // SAFETY: we just constructed a Mono variant above
-    /// let arr = unsafe { result.into_array1_unchecked() };
-    /// assert_eq!(arr.len(), 3);
-    /// ```
-    #[inline]
-    #[must_use]
-    pub unsafe fn into_array1_unchecked(self) -> Array1<T> {
-        match self {
-            Self::Mono(arr) => arr,
-            Self::MultiChannel(_) => panic!("Cannot convert MultiChannel to Array1"),
-        }
-    }
-
     /// Extracts the inner 2-D array if this result is [`MultiChannel`](NdResult::MultiChannel).
     ///
     /// # Returns
@@ -1111,43 +1073,6 @@ where
         match self {
             Self::Mono(_) => None,
             Self::MultiChannel(arr) => Some(arr),
-        }
-    }
-
-    /// Extracts the inner 2-D array without checking the variant.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that this `NdResult` is the
-    /// [`MultiChannel`](NdResult::MultiChannel) variant. Calling this on a
-    /// [`Mono`](NdResult::Mono) value panics in every build profile. It cannot
-    /// cause undefined behaviour.
-    ///
-    /// # Returns
-    ///
-    /// The inner `Array2<T>`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the variant is `Mono`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use audio_samples::NdResult;
-    /// use ndarray::array;
-    ///
-    /// let result: NdResult<f32> = NdResult::MultiChannel(array![[0.1, 0.2], [0.3, 0.4]]);
-    /// // SAFETY: we just constructed a MultiChannel variant above
-    /// let arr = unsafe { result.into_array2_unchecked() };
-    /// assert_eq!(arr.nrows(), 2);
-    /// ```
-    #[inline]
-    #[must_use]
-    pub unsafe fn into_array2_unchecked(self) -> Array2<T> {
-        match self {
-            Self::Mono(_) => panic!("Cannot convert Mono to Array2"),
-            Self::MultiChannel(arr) => arr,
         }
     }
 }
