@@ -1,3 +1,39 @@
+//! The sample-type traits: what a sample format is and how values convert
+//! between formats. The traits that provide audio operations are in
+//! [`operations::traits`](crate::operations::traits).
+//!
+//! - [`AudioSample`] is implemented by the six sample formats (`u8`, `i16`,
+//!   [`I24`], `i32`, `f32`, `f64`). It provides the full-scale constants (`MAX`,
+//!   `MIN`), `BITS`, `LABEL`, byte access and [`AudioSample::Float`], the float
+//!   type analysis of that format computes in (see
+//!   [Precision](crate#precision)).
+//! - [`StandardSample`] is the bound most of the crate's generic code uses: an
+//!   `AudioSample` that converts to and from every other format. It is implemented
+//!   automatically.
+//! - [`ConvertTo`] and [`ConvertFrom`] convert with audio scaling: full scale maps
+//!   to full scale, so `i16::MAX` becomes about `1.0_f32`.
+//! - [`CastFrom`] and [`CastInto`] are plain numeric casts, like `as`: `i16::MAX`
+//!   becomes `32767.0_f32`.
+//! - [`AudioTypeConversion`] applies either kind of conversion to a whole
+//!   [`AudioSamples`]: [`to_format`](AudioTypeConversion::to_format) scales,
+//!   [`cast_as`](AudioTypeConversion::cast_as) casts.
+//!
+//! ```rust
+//! use audio_samples::{AudioSamples, AudioTypeConversion, CastInto, ConvertTo, sample_rate};
+//! use ndarray::array;
+//!
+//! let scaled: f32 = i16::MAX.convert_to();
+//! let cast: f32 = i16::MAX.cast_into();
+//! assert!((scaled - 1.0).abs() < 1e-6);
+//! assert_eq!(cast, 32767.0);
+//!
+//! let pcm = AudioSamples::new_mono(array![0i16, 16384, i16::MIN], sample_rate!(8000)).unwrap();
+//! let float = pcm.to_format::<f32>();
+//! assert_eq!(float[2], -1.0);
+//! ```
+//!
+//! [`conversions`](crate::conversions) documents the scaling rules in full.
+
 use bytemuck::NoUninit;
 use ndarray::ScalarOperand;
 use num_traits::{FromPrimitive, Num, NumCast, One, ToBytes, Zero};
@@ -433,7 +469,7 @@ pub trait AudioSample:
     /// exactly.
     ///
     /// `u8`, `i16`, [`I24`] and `f32` use `f32`; `i32` and `f64` use `f64`.
-    /// See [`AudioFloat`](crate::AudioFloat).
+    /// See [`AudioFloat`](crate::AudioFloat) and [Precision](crate#precision).
     type Float: crate::AudioFloat;
 
     /// Converts this sample to [`Self::Float`] with the crate's audio-aware

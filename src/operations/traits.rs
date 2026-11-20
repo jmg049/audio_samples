@@ -1,209 +1,22 @@
-//! Core trait definitions for audio processing operations.
-//!
-//! This module declares the public trait surface of the `audio_samples` operation layer.
-//! Every capability is expressed as a separate, feature-gated trait that is implemented
-//! for [`AudioSamples`]:
-//!
-//! | Trait | Feature | Responsibility |
-//! |---|---|---|
-#![cfg_attr(
-    feature = "statistics",
-    doc = r#" | [`AudioStatistics`] | `statistics` | Peak, RMS, mean, variance, spectral centroid, … |"#
-)]
-#![cfg_attr(
-    not(feature = "statistics"),
-    doc = r#" | `AudioStatistics` | `statistics` | Peak, RMS, mean, variance, spectral centroid, … |"#
-)]
-#![cfg_attr(
-    feature = "processing",
-    doc = r#" | [`AudioProcessing`] | `processing` | Normalize, filter, resample, μ-law, … |"#
-)]
-#![cfg_attr(
-    not(feature = "processing"),
-    doc = r#" | `AudioProcessing` | `processing` | Normalize, filter, resample, μ-law, … |"#
-)]
-#![cfg_attr(
-    feature = "transforms",
-    doc = r#" | [`AudioTransforms`] | `transforms` | FFT, STFT, spectrograms, MFCCs, chromagram, … |"#
-)]
-#![cfg_attr(
-    not(feature = "transforms"),
-    doc = r#" | `AudioTransforms` | `transforms` | FFT, STFT, spectrograms, MFCCs, chromagram, … |"#
-)]
-#![cfg_attr(
-    feature = "transforms",
-    doc = r#" | [`AudioSpectrum`] | `transforms` | Multichannel STFT/ISTFT, mel spectrogram, MFCC |"#
-)]
-#![cfg_attr(
-    not(feature = "transforms"),
-    doc = r#" | `AudioSpectrum` | `transforms` | Multichannel STFT/ISTFT, mel spectrogram, MFCC |"#
-)]
-#![cfg_attr(
-    feature = "feature-extraction",
-    doc = r#" | [`AudioTonal`] | `feature-extraction` | STFT chroma, pitch tracking by parabolic peaks, tuning estimation |"#
-)]
-#![cfg_attr(
-    not(feature = "feature-extraction"),
-    doc = r#" | `AudioTonal` | `feature-extraction` | STFT chroma, pitch tracking by parabolic peaks, tuning estimation |"#
-)]
-#![cfg_attr(
-    feature = "feature-extraction",
-    doc = r#" | [`AudioFeatures`] | `feature-extraction` | Frame-wise spectral features, RMS, ZCR |"#
-)]
-#![cfg_attr(
-    not(feature = "feature-extraction"),
-    doc = r#" | `AudioFeatures` | `feature-extraction` | Frame-wise spectral features, RMS, ZCR |"#
-)]
-#![cfg_attr(
-    feature = "effects",
-    doc = r#" | [`AudioEffects`] | `effects` | Time stretch, pitch shift, emphasis, dB trim/split, HPSS |"#
-)]
-#![cfg_attr(
-    not(feature = "effects"),
-    doc = r#" | `AudioEffects` | `effects` | Time stretch, pitch shift, emphasis, dB trim/split, HPSS |"#
-)]
-#![cfg_attr(
-    all(feature = "transforms", feature = "resampling"),
-    doc = r#" | [`AudioConstantQ`] | `transforms` + `resampling` | CQT/VQT/iCQT, CQT, CENS and VQT chroma, tonnetz |"#
-)]
-#![cfg_attr(
-    not(all(feature = "transforms", feature = "resampling")),
-    doc = r#" | `AudioConstantQ` | `transforms` + `resampling` | CQT/VQT/iCQT, CQT, CENS and VQT chroma, tonnetz |"#
-)]
-#![cfg_attr(
-    feature = "editing",
-    doc = r#" | [`AudioEditing`] | `editing` | Trim, pad, fade, concatenate, mix, … |"#
-)]
-#![cfg_attr(
-    not(feature = "editing"),
-    doc = r#" | `AudioEditing` | `editing` | Trim, pad, fade, concatenate, mix, … |"#
-)]
-#![cfg_attr(
-    feature = "channels",
-    doc = r#" | [`AudioChannelOps`] | `channels` | Mono/stereo conversion, panning, interleave, … |"#
-)]
-#![cfg_attr(
-    not(feature = "channels"),
-    doc = r#" | `AudioChannelOps` | `channels` | Mono/stereo conversion, panning, interleave, … |"#
-)]
-#![cfg_attr(
-    feature = "envelopes",
-    doc = r#" | [`AudioEnvelopes`] | `envelopes` | Amplitude, RMS, attack/decay, analytic envelope, … |"#
-)]
-#![cfg_attr(
-    not(feature = "envelopes"),
-    doc = r#" | `AudioEnvelopes` | `envelopes` | Amplitude, RMS, attack/decay, analytic envelope, … |"#
-)]
-#![cfg_attr(
-    feature = "dynamic-range",
-    doc = r#" | [`AudioDynamicRange`] | `dynamic-range` | Compressor, limiter, gate, expander |"#
-)]
-#![cfg_attr(
-    not(feature = "dynamic-range"),
-    doc = r#" | `AudioDynamicRange` | `dynamic-range` | Compressor, limiter, gate, expander |"#
-)]
-#![cfg_attr(
-    feature = "iir-filtering",
-    doc = r#" | [`AudioIirFiltering`] | `iir-filtering` | Butterworth, Chebyshev IIR filters |"#
-)]
-#![cfg_attr(
-    not(feature = "iir-filtering"),
-    doc = r#" | `AudioIirFiltering` | `iir-filtering` | Butterworth, Chebyshev IIR filters |"#
-)]
-#![cfg_attr(
-    feature = "parametric-eq",
-    doc = r#" | [`AudioParametricEq`] | `parametric-eq` | Multi-band parametric EQ |"#
-)]
-#![cfg_attr(
-    not(feature = "parametric-eq"),
-    doc = r#" | `AudioParametricEq` | `parametric-eq` | Multi-band parametric EQ |"#
-)]
-#![cfg_attr(
-    feature = "pitch-analysis",
-    doc = r#" | [`AudioPitchAnalysis`] | `pitch-analysis` | YIN, autocorrelation, harmonic analysis |"#
-)]
-#![cfg_attr(
-    not(feature = "pitch-analysis"),
-    doc = r#" | `AudioPitchAnalysis` | `pitch-analysis` | YIN, autocorrelation, harmonic analysis |"#
-)]
-#![cfg_attr(
-    feature = "pitch-analysis",
-    doc = r#" | [`AudioPitchTracking`] | `pitch-analysis` | Frame-wise YIN and pYIN |"#
-)]
-#![cfg_attr(
-    not(feature = "pitch-analysis"),
-    doc = r#" | `AudioPitchTracking` | `pitch-analysis` | Frame-wise YIN and pYIN |"#
-)]
-#![cfg_attr(
-    feature = "vad",
-    doc = r#" | [`AudioVoiceActivityDetection`] | `vad` | Frame-based speech / silence classification |"#
-)]
-#![cfg_attr(
-    not(feature = "vad"),
-    doc = r#" | `AudioVoiceActivityDetection` | `vad` | Frame-based speech / silence classification |"#
-)]
-#![cfg_attr(
-    feature = "decomposition",
-    doc = r#" | [`AudioDecomposition`] | `decomposition` | Harmonic-percussive source separation (HPSS) |"#
-)]
-#![cfg_attr(
-    not(feature = "decomposition"),
-    doc = r#" | `AudioDecomposition` | `decomposition` | Harmonic-percussive source separation (HPSS) |"#
-)]
-#![cfg_attr(
-    feature = "onset-detection",
-    doc = r#" | [`AudioOnsetDetection`] | `onset-detection` | Onset times, spectral flux, complex ODF |"#
-)]
-#![cfg_attr(
-    not(feature = "onset-detection"),
-    doc = r#" | `AudioOnsetDetection` | `onset-detection` | Onset times, spectral flux, complex ODF |"#
-)]
-#![cfg_attr(
-    feature = "beat-tracking",
-    doc = r#" | [`AudioBeatTracking`] | `beat-tracking` | Tempo-aware beat detection |"#
-)]
-#![cfg_attr(
-    not(feature = "beat-tracking"),
-    doc = r#" | `AudioBeatTracking` | `beat-tracking` | Tempo-aware beat detection |"#
-)]
-#![cfg_attr(
-    feature = "beat-tracking",
-    doc = r#" | [`AudioRhythm`] | `beat-tracking` | Onset strength/detection, tempogram, tempo, beat tracking, PLP |"#
-)]
-#![cfg_attr(
-    not(feature = "beat-tracking"),
-    doc = r#" | `AudioRhythm` | `beat-tracking` | Onset strength/detection, tempogram, tempo, beat tracking, PLP |"#
-)]
-#![cfg_attr(
-    feature = "plotting",
-    doc = r#" | [`AudioPlotting`] | `plotting` | Waveform, spectrogram, magnitude-spectrum plots |"#
-)]
-#![cfg_attr(
-    not(feature = "plotting"),
-    doc = r#" | `AudioPlotting` | `plotting` | Waveform, spectrogram, magnitude-spectrum plots |"#
-)]
-//!
-//! Grouping operations into separate traits means only the code for the enabled
-//! features is compiled, and new capabilities can be added as new traits. Each trait
-//! is independently usable: bring only the traits you need into scope.
-//!
-//! ## Usage
-//!
-//! Bring the relevant trait into scope with a `use` statement, then call its methods
-//! on any [`AudioSamples`] instance:
+//! The operation traits, one per area of processing or analysis, each implemented
+//! for [`AudioSamples`]. Most are also re-exported at the crate root. Each trait
+//! sits behind a cargo feature, so a build compiles only the areas it enables (see
+//! [Feature flags](crate#feature-flags)).
 //!
 //! ```rust
-//! use audio_samples::{AudioSamples, sample_rate};
-//! use ndarray::array;
+//! # #[cfg(feature = "statistics")] {
+//! use audio_samples::operations::traits::AudioStatistics;
+//! use audio_samples::{sample_rate, sine_wave};
+//! use std::time::Duration;
 //!
-//! let audio = AudioSamples::new_mono(
-//!     array![1.0f32, -0.5, 0.25, -0.1],
-//!     sample_rate!(44100),
-//! ).unwrap();
-//!
-//! assert_eq!(audio.samples_per_channel().get(), 4);
-//! assert_eq!(audio.sample_rate().get(), 44100);
+//! let audio = sine_wave::<f32>(1000.0, Duration::from_millis(10), sample_rate!(48000), 0.5);
+//! assert!((audio.peak() - 0.5).abs() < 1e-6);
+//! # }
 //! ```
+//!
+//! The [task table](crate#where-to-find-things) says which trait covers a task, and
+//! [Choosing between overlapping APIs](crate::operations#choosing-between-overlapping-apis)
+//! says which to use where two overlap.
 
 // The `explainable` attribute (feature `educational`) generates a chain
 // wrapper that calls every `AudioProcessing` method, including the deprecated
@@ -2270,8 +2083,9 @@ where
 /// Spectrogram dB values are 10·log10(max(power, 10^(floor_db/10))) re 1 (an
 /// absolute floor, no `top_db`). Mel bands use the Slaney mel scale applied to
 /// power, without filter normalisation by default; MFCCs use an unnormalised
-/// DCT-II and an HTK lifter (L = 22) by default. The
-/// [`crate::operations::transforms`] module docs give every formula.
+/// DCT-II and an HTK lifter (L = 22) by default. Every method except
+/// [`fft`](Self::fft) needs mono input. The [`crate::operations::transforms`]
+/// module docs give every formula.
 ///
 /// # Invariants
 ///

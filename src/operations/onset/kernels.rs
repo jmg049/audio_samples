@@ -1,15 +1,6 @@
-//! Low-level DSP kernels for onset detection.
-//!
-//! This module provides optimized, low-level building blocks for onset detection algorithms.
-//! These functions operate directly on spectrograms and detection functions to compute onset
-//! features and apply adaptive thresholding.
-//!
-//! The kernels include:
-//! - The "energy" onset detection function (half-wave-rectified magnitude flux)
-//! - Adaptive thresholding using median-based local thresholds
-//!
-//! These functions are typically used internally by higher-level onset detection implementations
-//! and are optimized for performance.
+//! Building blocks of the onset detectors that work on spectrograms and detection
+//! functions: the "energy" onset detection function (a half-wave-rectified
+//! magnitude flux) and median-based adaptive thresholding.
 
 use ndarray::Array2;
 use non_empty_slice::{NonEmptySlice, NonEmptyVec};

@@ -1,8 +1,6 @@
 //! Array helpers: local extrema, event and interval matching, one-dimensional
 //! interpolation, padding, reordering, compressed sparse rows and argument checks.
 //!
-//! # What
-//!
 //! Small, general operations on `ndarray` arrays and index lists that feature
 //! pipelines keep needing: [`localmax`] / [`localmin`], [`match_events`] /
 //! [`match_intervals`], [`fix_frames`] / [`index_to_slice`], [`axis_sort`],
@@ -11,14 +9,10 @@
 //! [`sparsify_rows`], [`interp1d`] / [`interp_broadcast`], [`buf_to_float`],
 //! [`find_files`], and checks such as [`valid_audio`] and [`valid_intervals`].
 //!
-//! # Why
-//!
 //! Each of these is a few lines to write once and easy to get subtly wrong at the
 //! edges: the first and last element of a local-extremum test, ties when matching
 //! events, a wrapped gradient, spline end conditions. Keeping them in one tested
 //! place lets analysis code and users share one definition.
-//!
-//! # How
 //!
 //! All functions are free functions over `ndarray` views or slices. Functions on
 //! floats are generic over [`AudioFloat`] and return the input's element type.

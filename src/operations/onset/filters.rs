@@ -1,17 +1,6 @@
-//! Signal processing utilities for onset detection.
-//!
-//! This module provides basic signal processing functions commonly used in onset detection
-//! pipelines. These utilities operate on 1D signals (typically onset detection functions)
-//! to improve detection accuracy and robustness.
-//!
-//! The functions include:
-//! - Median filtering for smoothing and adaptive thresholding
-//! - Rectification for keeping only positive values
-//! - Logarithmic compression for dynamic range reduction
-//!
-//! These operations are typically applied in sequence to condition onset detection functions
-//! before peak picking. For example: compute ODF → rectify → log compress → median filter →
-//! adaptive threshold → peak pick.
+//! Conditioning of a 1-D onset detection function before peak picking: median
+//! filtering, half-wave rectification and logarithmic compression. A typical chain
+//! is ODF, rectify, compress, median filter, adaptive threshold, peak picking.
 
 use std::num::NonZeroUsize;
 

@@ -1,36 +1,33 @@
-//! Parametric equalizer for precise frequency shaping.
-//!
-//! This module implements parametric EQ processing: peak (boost/cut) filters, shelving
-//! filters, and pass/stop filters organised into bands. A [`ParametricEq`] configuration
-//! holds any number of [`EqBand`]s that are applied in sequence.
-//!
-//! Parametric EQ is the standard tool for correcting frequency imbalances, shaping
-//! tonal character, and removing unwanted resonances. Each band gives independent
-//! control over centre frequency, gain, and bandwidth (Q), making it far more
-//! flexible than fixed-band graphic equalisers.
-//!
-//! All EQ operations are accessed through the [`AudioParametricEq`] trait. Build a
-//! [`ParametricEq`] using its constructors or add bands one at a time, then pass it
-//! to [`apply_parametric_eq`][AudioParametricEq::apply_parametric_eq]. Convenience
+//! Parametric equalisation: peak (boost or cut), shelving and pass or stop filters
+//! organised into bands, as the methods of [`AudioParametricEq`]. A
+//! [`ParametricEq`] holds any number of [`EqBand`]s, applied in sequence by
+//! [`apply_parametric_eq`][AudioParametricEq::apply_parametric_eq]; single-band
 //! methods such as [`apply_peak_filter`][AudioParametricEq::apply_peak_filter] and
-//! [`apply_low_shelf`][AudioParametricEq::apply_low_shelf] handle single-band use
-//! cases without constructing a full [`ParametricEq`].
-//!
-//! # Example
+//! [`apply_low_shelf`][AudioParametricEq::apply_low_shelf] need no `ParametricEq`.
 //!
 //! ```
-//! use audio_samples::{AudioSamples, AudioParametricEq, sample_rate};
-//! use audio_samples::operations::types::{ParametricEq, EqBand};
-//! use ndarray::Array1;
+//! use audio_samples::operations::types::{EqBand, ParametricEq};
+//! use audio_samples::{AudioParametricEq, sample_rate, sine_wave};
+//! use std::time::Duration;
 //!
-//! let data = Array1::from_elem(1024, 0.5f32);
-//! let mut audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
+//! let audio = sine_wave::<f32>(1000.0, Duration::from_millis(100), sample_rate!(44100), 0.25);
 //!
 //! let mut eq = ParametricEq::new();
-//! eq.add_band(EqBand::peak(1000.0, 3.0, 2.0));        // +3 dB at 1 kHz
-//! eq.add_band(EqBand::low_shelf(100.0, -2.0, 0.707)); // -2 dB low shelf, -1 dB (half gain) at 100 Hz
-//! audio.apply_parametric_eq_in_place(&eq).unwrap();
+//! eq.add_band(EqBand::peak(1000.0, 6.0, 2.0)); // +6 dB at 1 kHz, Q 2
+//! eq.add_band(EqBand::low_shelf(100.0, -2.0, 0.707)); // -2 dB below 100 Hz
+//! let shaped = audio.apply_parametric_eq(&eq).unwrap();
+//! assert_eq!(shaped.samples_per_channel(), audio.samples_per_channel());
+//!
+//! // The peak band's gain at its centre frequency is exactly +6 dB.
+//! let (mag, _phase) = audio.eq_frequency_response(&eq, &[1000.0]).unwrap();
+//! assert!((20.0 * mag[0].log10() - 6.0).abs() < 0.1);
 //! ```
+//!
+//! ## How it works
+//!
+//! Each band is a biquad designed with the RBJ cookbook formulas and run in
+//! transposed direct form II. A peak band's gain at its centre frequency is
+//! exactly `gain_db`; a shelf reaches `gain_db / 2` at its corner frequency.
 
 use num_traits::FloatConst;
 

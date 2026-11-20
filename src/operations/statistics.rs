@@ -1,34 +1,54 @@
-//! Statistical analysis operations for [`AudioSamples`].
-//!
-//! ## What
-//!
-//! This module implements the [`AudioStatistics`] trait: descriptive statistics
-//! (peak, mean, RMS, variance), temporal descriptors (zero crossings,
-//! auto- and cross-correlation) and whole-signal spectral descriptors
-//! (centroid, rolloff, bandwidth, flatness, crest, slope, contrast). It also
+//! Whole-signal statistics: peak, mean, RMS, variance, zero crossings, auto- and
+//! cross-correlation, and spectral descriptors (centroid, rolloff, bandwidth,
+//! flatness, crest, slope, contrast), each reduced to one number. The methods
+//! belong to [`AudioStatistics`]; for one value per frame, use the frame-wise
+//! features instead (see
+//! [Choosing between overlapping APIs](crate::operations#choosing-between-overlapping-apis)).
 #![cfg_attr(
     feature = "transforms",
-    doc = r#" provides the free function [`fft_alignment_lag`] for delay estimation."#
+    doc = r#" [`fft_alignment_lag`] estimates the delay between two signals."#
 )]
 #![cfg_attr(
     not(feature = "transforms"),
-    doc = r#" provides the free function `fft_alignment_lag` (requires the `transforms` feature) for delay estimation."#
+    doc = r#" `fft_alignment_lag` estimates the delay between two signals."#
 )]
 //!
-//! ## Why
+//! ```rust
+//! use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
+//! use ndarray::array;
 //!
-//! Statistical measures are a core part of audio analysis. Isolating them into a
-//! single trait keeps the [`AudioSamples`] API organised and lets users access
-//! only the statistical surface they need. This module is the sole implementor of
-//! [`AudioStatistics`] for [`AudioSamples`].
+//! let data = array![1.0f32, -1.0, 0.5, -0.5];
+//! let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
 //!
-//! ## How
+//! let peak = audio.peak();
+//! let rms  = audio.rms();
+//! let mean = audio.mean();
 //!
-//! All operations are available on any [`AudioSamples<T>`] where `T` is a
-//! supported sample type (`u8`, `i16`, `I24`, `i32`, `f32`, `f64`). Import
-//! [`AudioStatistics`] and call methods on your audio directly.
+//! assert_eq!(peak, 1.0);
+//! assert!((rms - 0.625f64.sqrt()).abs() < 1e-12); // sqrt((1 + 1 + 0.25 + 0.25) / 4)
+//! assert_eq!(mean, 0.0);
+//! ```
 //!
-//! ### Units: raw sample values vs normalised amplitude
+//! ```rust
+//! # #[cfg(feature = "transforms")] {
+//! use audio_samples::{sine_wave, AudioStatistics, sample_rate};
+//! use audio_samples::operations::types::ChannelReduction;
+//! use std::time::Duration;
+//!
+//! // 1 s at 44.1 kHz: the 1 kHz tone falls exactly on bin 1000 (fs/N = 1 Hz).
+//! let audio = sine_wave::<f64>(1000.0, Duration::from_secs(1), sample_rate!(44100), 0.5);
+//!
+//! let centroid = audio.spectral_centroid(ChannelReduction::Error).unwrap();
+//! let rolloff  = audio.spectral_rolloff(0.85, ChannelReduction::Error).unwrap();
+//!
+//! assert!((centroid - 1000.0).abs() < 1.0);
+//! assert!((rolloff - 1000.0).abs() < 1.0);
+//! # }
+//! ```
+//!
+//! ## Conventions
+//!
+//! The methods differ in the units they work in:
 //!
 //! - `mean`, `variance`, `std_dev`, `rms`, `autocorrelation` and
 //!   `cross_correlation` work on **raw sample values** converted numerically to
@@ -37,11 +57,13 @@
 //!   `u8` is offset-binary (silence = 128), so its mean of a silent signal is
 //!   `128.0`. Convert first (e.g. [`as_f64`](crate::AudioTypeConversion::as_f64))
 //!   if you want values in `[-1, 1]`.
-//! - `zero_crossings` / `zero_crossing_rate` and all spectral methods use the
-//!   audio-aware conversion to `f64` (integers scaled to `[-1, 1]`, `u8` 128 → 0),
-//!   so `u8` zero crossings are counted about mid-scale.
+//! - `zero_crossings`, `zero_crossing_rate` and the spectral methods work in units
+//!   of full scale, like the rest of the crate's analysis (integers scaled to
+//!   `[-1, 1]`, `u8` 128 → 0), so `u8` zero crossings are counted about mid-scale.
 //!
-//! ### Time-domain definitions
+//! ## Definitions
+//!
+//! ### Time domain
 //!
 //! For samples `x[0..N]` (all channels pooled unless stated otherwise):
 //!
@@ -80,13 +102,13 @@
 )]
 #![cfg_attr(
     not(feature = "transforms"),
-    doc = r#"   opposite delay, or use `fft_alignment_lag` (requires the `transforms` feature)."#
+    doc = r#"   opposite delay, or use `fft_alignment_lag`."#
 )]
 //!
-//! ### Spectral definitions
+//! ### Spectral
 //!
 //! The spectral methods reduce the input to one channel (see
-//! `ChannelReduction` in [`crate::operations::types`]), take a
+//! [`ChannelReduction`]), take a
 //! **single FFT of the whole signal** (FFT length = signal length `N`, no
 //! framing, rectangular window except `spectral_contrast`, which uses a Hann
 //! window) and use the one-sided spectrum `X[k]`, `k = 0..=⌊N/2⌋`, without
@@ -122,73 +144,9 @@
 )]
 //!   values are `10·log10` of **magnitudes**.
 //!
-//! Note: the frame-wise features of `AudioFeatures` (`*_frames`) are computed
-//! per STFT frame (Hann window, `n_fft = 2048`) and weight centroid and
-//! bandwidth by **magnitude** (`S = |X|`), so their centroid and rolloff are
-//! not directly comparable with the power-weighted, whole-signal values here.
-//!
-//! ## Example: Time-domain analysis
-//!
-//! ```rust
-//! use audio_samples::{AudioSamples, AudioStatistics, sample_rate};
-//! use ndarray::array;
-//!
-//! let data = array![1.0f32, -1.0, 0.5, -0.5];
-//! let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
-//!
-//! let peak = audio.peak();
-//! let rms  = audio.rms();
-//! let mean = audio.mean();
-//!
-//! assert_eq!(peak, 1.0);
-//! assert!((rms - 0.625f64.sqrt()).abs() < 1e-12); // sqrt((1 + 1 + 0.25 + 0.25) / 4)
-//! assert_eq!(mean, 0.0);
-//! ```
-//!
-//! ## Example: Frequency-domain analysis
-//!
-//! ```rust
-//! # #[cfg(feature = "transforms")] {
-//! use audio_samples::{sine_wave, AudioStatistics, sample_rate};
-//! use audio_samples::operations::types::ChannelReduction;
-//! use std::time::Duration;
-//!
-//! // 1 s at 44.1 kHz: the 1 kHz tone falls exactly on bin 1000 (fs/N = 1 Hz).
-//! let audio = sine_wave::<f64>(1000.0, Duration::from_secs(1), sample_rate!(44100), 0.5);
-//!
-//! let centroid = audio.spectral_centroid(ChannelReduction::Error).unwrap();
-//! let rolloff  = audio.spectral_rolloff(0.85, ChannelReduction::Error).unwrap();
-//!
-//! assert!((centroid - 1000.0).abs() < 1.0);
-//! assert!((rolloff - 1000.0).abs() < 1.0);
-//! # }
-//! ```
-//!
-//! ## Error Handling
-//!
-//! Most operations return plain numeric results. Methods that perform FFT
-//! computation or validate input parameters return [`crate::AudioSampleResult`].
-//! An [`crate::AudioSampleError::Processing`] is returned for mathematical
-//! failures, and [`crate::AudioSampleError::Parameter`] for invalid arguments.
-//!
-//! ## Feature Flags
-//!
-//! - `statistics`: enables this module and the time-domain methods.
-//! - `transforms`: additionally enables `autocorrelation`, the spectral
-#![cfg_attr(
-    feature = "transforms",
-    doc = r#"   methods and [`fft_alignment_lag`] via the [`spectrograms`] crate."#
-)]
-#![cfg_attr(
-    not(feature = "transforms"),
-    doc = r#"   methods and `fft_alignment_lag` via the `spectrograms` crate."#
-)]
-//!
-//! ## See Also
-//!
-//! - [`AudioSamples`]: The core data structure providing access to underlying
-//!   sample buffers.
-//! - [`AudioStatistics`]: The trait defining all statistical operations.
+//! The frame-wise features (`AudioFeatures::*_frames`) work per STFT frame and
+//! weight the centroid by magnitude, so their values are not directly comparable
+//! with these.
 //!
 //! [`AudioStatistics`]: crate::operations::traits::AudioStatistics
 

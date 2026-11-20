@@ -1,7 +1,5 @@
 //! Explanations of configurations and concepts, computed from your settings.
 //!
-//! ## What
-//!
 //! This module turns a configuration value (an
 #![cfg_attr(feature = "transforms", doc = r#" [`StftParams`],"#)]
 #![cfg_attr(not(feature = "transforms"), doc = r#" `StftParams`,"#)]
@@ -15,11 +13,9 @@
 //! from your settings (frequency resolution, group delay, pole radii, …),
 //! trade-offs, and warnings about suspicious settings.
 //!
-//! ## Why
-//!
 //! Signal-processing parameters are easy to get subtly wrong: a window that is
 //! too short to resolve a low voice, a mel filterbank with empty bands, a
-//! filter whose cutoff is at the Nyquist frequency. The existing
+//! filter whose cutoff is at the Nyquist frequency. The
 //! [`explaining`](explainable::Explainable::explaining) chain answers "what did
 //! this pipeline do to my signal" *after* processing; this module answers "what
 //! will this configuration do, and why" *before* anything runs. Every number is
@@ -27,8 +23,6 @@
 //! filter gains from the crate's own frequency-response code), and where the
 //! implementation deviates from a textbook convention the explanation says
 //! what the code does.
-//!
-//! ## How
 //!
 //! * Types that implement [`Explain`] can be explained on their own
 //!   (`params.explain()`) or with extra context

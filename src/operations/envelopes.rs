@@ -1,17 +1,33 @@
-//! Amplitude envelope extraction for [`AudioSamples`].
+//! Amplitude envelopes: the rectified signal, windowed RMS, moving average,
+//! attack and decay following, and the analytic-signal envelope, as the methods
+//! of [`AudioEnvelopes`]. Each returns an [`NdResult`] with the input's channel
+//! layout: a 1-D array for mono audio, a 2-D array for multi-channel audio.
+//! For a frame-wise RMS in units of full scale on centred frames, see
+//! [Choosing between overlapping APIs](crate::operations#choosing-between-overlapping-apis).
 //!
-//! This module implements the [`AudioEnvelopes`] trait, which provides
-//! five methods for tracking how the amplitude of an audio signal
-//! varies over time: instantaneous rectification, windowed RMS,
-//! moving average, attack/decay following, and the analytic signal
-//! envelope.
+//! ```
+//! use audio_samples::{AudioSamples, NdResult, sample_rate};
+//! use audio_samples::operations::traits::AudioEnvelopes;
+//! use ndarray::array;
 //!
-//! Envelope detection is fundamental to dynamics analysis, onset
-//! detection, amplitude modulation, and feature extraction.
-//! Gathering these methods behind a single trait gives callers a
-//! uniform interface regardless of the underlying sample type
+//! let audio = AudioSamples::new_mono(
+//!     array![1.0f32, -0.5, 0.25],
+//!     sample_rate!(44100),
+//! ).unwrap();
+//! let envelope = audio.amplitude_envelope();
+//! if let NdResult::Mono(env) = envelope {
+//!     assert_eq!(env[0], 1.0f32);
+//!     assert_eq!(env[1], 0.5f32); // |-0.5| = 0.5
+//! }
+//! ```
 //!
-//! # Definitions
+//! ## Conventions
+//!
+//! Envelopes are computed in `f64` on the stored sample values: integer samples
+//! are not rescaled to `[-1, 1]` first, unlike the rest of the crate's analysis
+//! (see [Precision](crate#precision)).
+//!
+//! ## Definitions
 //!
 //! For an input `x[n]`, `n = 0 … N−1`, window length `W` and hop `H`
 //! (both in samples), frame `k` starts at sample `kH` and covers
@@ -29,31 +45,6 @@
 //!   [`EnvelopeFollower`] (time constants as described in
 //!   [`crate::operations::dynamic_range`]), split into its rising and falling
 //!   parts by sample-and-hold.
-//!
-//! All envelopes are computed in `f64` on the samples' stored values: integer
-//! samples are not rescaled to `[-1, 1]` first.
-//!
-//! Bring [`AudioEnvelopes`] into scope and call methods on any
-//! [`AudioSamples`] value.  Each method returns an [`NdResult`] that
-//! mirrors the input channel layout: mono audio yields
-//! `NdResult::Mono`, multi-channel audio yields
-//! `NdResult::MultiChannel`.
-//!
-//! ```
-//! use audio_samples::{AudioSamples, NdResult, sample_rate};
-//! use audio_samples::operations::traits::AudioEnvelopes;
-//! use ndarray::array;
-//!
-//! let audio = AudioSamples::new_mono(
-//!     array![1.0f32, -0.5, 0.25],
-//!     sample_rate!(44100),
-//! ).unwrap();
-//! let envelope = audio.amplitude_envelope();
-//! if let NdResult::Mono(env) = envelope {
-//!     assert_eq!(env[0], 1.0f32);
-//!     assert_eq!(env[1], 0.5f32); // |-0.5| = 0.5
-//! }
-//! ```
 
 use std::num::NonZeroUsize;
 

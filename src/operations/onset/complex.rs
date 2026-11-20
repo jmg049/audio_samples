@@ -1,19 +1,9 @@
-//! Complex domain onset detection functions.
-//!
-//! This module provides low-level functions for onset detection using both magnitude and phase
-//! information from complex spectrograms. Complex domain methods analyze changes in both the
-//! amplitude and phase of frequency components, providing more detailed information about
-//! spectral changes than magnitude-only approaches.
-//!
-//! The primary functions compute:
-//! - Magnitude differences between consecutive frames
-//! - Phase deviations from expected phase progression
-//! - Combined onset detection functions weighted by configuration
-//!
-//! These functions are used internally by the [`AudioOnsetDetection`] trait implementations
-//! and are not typically called directly by users.
-//!
-//! [`AudioOnsetDetection`]: crate::operations::traits::AudioOnsetDetection
+//! Complex-domain onset detection functions, which use both the magnitude and the
+//! phase of each CQT bin: magnitude differences between frames, the deviation of
+//! each bin's phase advance from that of its centre frequency, and their weighted
+//! combination ([`ComplexOnsetConfig`]). The
+//! [`AudioOnsetDetection`](crate::operations::traits::AudioOnsetDetection)
+//! methods call these; use them directly to build a custom detector.
 
 use super::ComplexOnsetConfig;
 use ndarray::{Array2, ArrayView2, Axis, s};

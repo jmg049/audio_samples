@@ -1,3 +1,8 @@
+//! Spectrogram plots: [`create_spectrogram_plot`] and [`SpectrogramPlot`]. The
+//! frequency axis is linear, logarithmic, mel or gammatone, with magnitude, power
+//! or decibel values ([`SpectrogramType`]), and the plot takes overlays such as
+//! lines and contour tracks (a pitch or centroid track).
+
 use plotly::common::{ColorBar, ColorScale, ColorScalePalette, Mode};
 use plotly::layout::Annotation;
 use plotly::{
@@ -28,7 +33,7 @@ const DEFAULT_FREQ_PADDING: f64 = 0.4; // 40% padding on each side when auto-zoo
 /// Interactive time-frequency representation with configurable scale and amplitude encoding.
 ///
 /// # Purpose
-/// Encapsulates a rendered Plotly spectrogram visualization. Provides methods for saving
+/// Encapsulates a rendered Plotly spectrogram visualisation. Provides methods for saving
 /// to disk, generating HTML, and adding overlays such as vertical/horizontal lines, contour
 /// tracks (e.g., pitch, spectral centroid), and spectral feature annotations.
 ///
@@ -274,7 +279,7 @@ impl SpectrogramPlot {
     /// Overlays a continuous contour line representing a time-varying frequency track.
     ///
     /// Renders a white line with cyan markers following the provided time-frequency trajectory.
-    /// Commonly used to visualize pitch (F0) tracks, formant trajectories, or other spectral
+    /// Commonly used to visualise pitch (F0) tracks, formant trajectories, or other spectral
     /// features that evolve over time.
     ///
     /// # Arguments
@@ -419,7 +424,7 @@ impl SpectrogramPlot {
 /// Configuration parameters for spectrogram plot generation.
 ///
 /// # Purpose
-/// Encapsulates all settings required to generate a spectrogram visualization, including
+/// Encapsulates all settings required to generate a spectrogram visualisation, including
 /// STFT parameters, frequency/amplitude scale selection, color mapping, axis ranges, and
 /// channel management strategy.
 ///
@@ -479,7 +484,7 @@ impl AsRef<Self> for SpectrogramPlotParams {
 ///
 /// # Purpose
 /// Defines all supported combinations of frequency scale (linear, logarithmic, mel, gammatone)
-/// and amplitude encoding (magnitude, power, decibels) for spectrogram visualization.
+/// and amplitude encoding (magnitude, power, decibels) for spectrogram visualisation.
 ///
 /// # Intended Usage
 /// Used as a field in [`SpectrogramPlotParams`] to determine which spectrogram computation
@@ -595,7 +600,7 @@ impl SpectrogramPlotParams {
     /// 16 kHz. The plotted mel axis shows the true Slaney-scale band centres.
     ///
     /// # Returns
-    /// A [`SpectrogramPlotParams`] instance configured for mel-dB visualization.
+    /// A [`SpectrogramPlotParams`] instance configured for mel-dB visualisation.
     ///
     /// # Example
     /// ```rust,no_run
@@ -650,7 +655,7 @@ impl SpectrogramPlotParams {
     /// perceptual scaling is not desired.
     ///
     /// # Returns
-    /// A [`SpectrogramPlotParams`] instance configured for linear magnitude visualization.
+    /// A [`SpectrogramPlotParams`] instance configured for linear magnitude visualisation.
     ///
     /// # Example
     /// ```rust,no_run
@@ -720,7 +725,7 @@ impl Default for SpectrogramPlotParams {
 /// automatic frequency range detection, and optional kHz scaling for high-frequency signals.
 ///
 /// # Arguments
-/// * `audio` - The audio data to visualize. Can be mono or multi-channel.
+/// * `audio` - The audio data to visualise. Can be mono or multi-channel.
 /// * `params` - Configuration parameters controlling the spectrogram type, STFT settings,
 ///   colormap, axis ranges, and channel management.
 ///
@@ -1016,7 +1021,7 @@ struct SpectrogramData {
 /// Returns (min_freq, max_freq) with the specified padding
 ///
 /// # Arguments
-/// * `spec_data` - The spectrogram data to analyze
+/// * `spec_data` - The spectrogram data to analyse
 /// * `padding_fraction` - Padding to add on each side (e.g., 0.1 = 10%)
 fn detect_frequency_range(spec_data: &SpectrogramData, padding_fraction: f64) -> (f64, f64) {
     let n_freq_bins = spec_data.freq_axis.len();

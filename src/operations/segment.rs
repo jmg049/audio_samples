@@ -1,30 +1,10 @@
-//! Structure analysis over feature matrices: path enhancement, temporally constrained
-//! clustering and subsegmentation.
+//! Structure analysis over feature matrices: path enhancement, temporally
+//! constrained clustering and subsegmentation. Repeated musical passages appear as
+//! diagonal stripes in a recurrence matrix; smoothing along the stripes, at slopes
+//! that allow for small tempo differences, makes them stand out, and linear
+//! temporal clustering turns frames into sections.
 //!
-//! # What
-//!
-//! - [`diagonal_filter`]: a smoothing kernel along a line through the origin.
-//! - [`path_enhance`]: the largest response of a recurrence matrix to diagonal kernels of
-//!   several slopes.
-//! - [`timelag_filter`]: applies a filter to a recurrence matrix in lag coordinates.
-//! - [`agglomerative`]: Ward clustering of frames, where only neighbouring segments may
-//!   merge, returning the segment boundaries.
-//! - [`subsegment`]: the same inside each interval of a coarser segmentation.
-//!
-//! # Why
-//!
-//! Repeated musical passages appear as diagonal stripes in a recurrence matrix. Smoothing
-//! along the stripes, at slopes that allow for small tempo differences, makes them stand
-//! out, and linear temporal clustering turns frames into sections.
-//!
-//! # How
-//!
-//! Matrices have one column per frame. The kernel of [`diagonal_filter`] is a window on the
-//! main diagonal, rotated by quintic B-spline interpolation. [`agglomerative`] keeps a heap
-//! of the Ward distances of neighbouring clusters, so it takes `O(n log n)` merges'
-//! worth of work on `n` frames.
-//!
-//! ```
+//! ```rust
 //! use audio_samples::operations::segment::agglomerative;
 //! use ndarray::array;
 //!
@@ -33,12 +13,36 @@
 //! assert_eq!(agglomerative(x.view(), 2).unwrap(), vec![0, 3]);
 //! ```
 //!
-//! References: J. H. Ward, *Hierarchical grouping to optimize an objective function*,
-//! JASA 58, 1963; G. N. Lance and W. T. Williams, *A general theory of classificatory
-//! sorting strategies*, The Computer Journal 9, 1967; J. Foote, *Visualizing music and
-//! audio using self-similarity*, ACM Multimedia 1999; M. Müller and F. Kurth, *Enhancing
-//! similarity matrices for music audio analysis*, ICASSP 2006; M. Unser, *Splines: a
-//! perfect fit for signal and image processing*, IEEE SPM 16, 1999.
+//! - [`diagonal_filter`]: a smoothing kernel along a line through the origin.
+//! - [`path_enhance`]: the largest response of a recurrence matrix to diagonal
+//!   kernels of several slopes.
+//! - [`timelag_filter`]: applies a filter to a recurrence matrix in lag coordinates.
+//! - [`agglomerative`]: Ward clustering of frames, where only neighbouring segments
+//!   may merge, returning the segment boundaries.
+//! - [`subsegment`]: the same inside each interval of a coarser segmentation.
+//!
+//! Recurrence matrices themselves come from
+//! [`operations::sequence`](crate::operations::sequence).
+//!
+//! ## How it works
+//!
+//! Matrices have one column per frame. The kernel of [`diagonal_filter`] is a
+//! window on the main diagonal, rotated by quintic B-spline interpolation.
+//! [`agglomerative`] keeps a heap of the Ward distances of neighbouring clusters,
+//! so it does `O(n log n)` work on `n` frames.
+//!
+//! ## References
+//!
+//! - J. H. Ward, *Hierarchical grouping to optimize an objective function*, JASA
+//!   58, 1963.
+//! - G. N. Lance and W. T. Williams, *A general theory of classificatory sorting
+//!   strategies*, The Computer Journal 9, 1967.
+//! - J. Foote, *Visualizing music and audio using self-similarity*, ACM Multimedia
+//!   1999.
+//! - M. Müller and F. Kurth, *Enhancing similarity matrices for music audio
+//!   analysis*, ICASSP 2006.
+//! - M. Unser, *Splines: a perfect fit for signal and image processing*, IEEE SPM
+//!   16, 1999.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -270,7 +274,7 @@ impl PathEnhanceConfig {
         }
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`new`](Self::new).
+    /// Settings matching librosa 1.0's defaults; the same as [`new`](Self::new).
     #[must_use]
     pub fn librosa() -> Self {
         Self::new()

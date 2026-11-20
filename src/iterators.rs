@@ -1,42 +1,42 @@
-//! Structured iteration over audio sample data.
+//! Iteration over [`AudioSamples`] by frame, by channel and by window.
 //!
-//! This module defines the primary iteration abstractions for traversing
-//! [`AudioSamples`] in semantically meaningful ways. Rather than exposing raw
-//! indexing or layout-dependent access, the iterators in this module present
-//! audio data through three views:
+//! The methods come from [`AudioSampleIterators`] and are also inherent methods of
+//! `AudioSamples`:
 //!
-//! - **Frames** - a snapshot across all channels at one time index
-//!   ([`FrameIterator`])
-//! - **Channels** - the full temporal sequence for one channel
-//!   ([`ChannelIterator`])
-//! - **Windows** - fixed-size, optionally overlapping temporal blocks
+//! - [`frames`](AudioSamples::frames) yields one frame per time step (one sample
+//!   from each channel), as audio that borrows the buffer.
+//! - [`channels`](AudioSamples::channels) yields each channel as an owned mono
+//!   copy.
 #![cfg_attr(
     feature = "editing",
-    doc = r#"   ([`WindowIterator`], requires the `editing` feature)"#
+    doc = r#" - [`windows`](AudioSamples::windows) yields fixed-size, optionally overlapping and"#
 )]
 #![cfg_attr(
     not(feature = "editing"),
-    doc = r#"   (`WindowIterator`, requires the `editing` feature)"#
+    doc = r#" - `windows` yields fixed-size, optionally overlapping and"#
+)]
+#![cfg_attr(
+    feature = "editing",
+    doc = r#"   padded blocks as owned copies; [`windows_ref`](AudioSamples::windows_ref) yields"#
+)]
+#![cfg_attr(
+    not(feature = "editing"),
+    doc = r#"   padded blocks as owned copies; `windows_ref` yields"#
+)]
+#![cfg_attr(
+    feature = "editing",
+    doc = r#"   [`WindowView`]s that borrow the buffer, for the fully contained windows only."#
+)]
+#![cfg_attr(
+    not(feature = "editing"),
+    doc = r#"   `WindowView`s that borrow the buffer, for the fully contained windows only."#
 )]
 //!
-//! Audio algorithms frequently need to traverse data in ways that reflect its
-//! *structure* rather than its *storage layout*. Centralising iteration logic here
-//! prevents duplicated indexing and boundary-handling code throughout the crate,
-//! while keeping each iterator's ownership and lifetime contract explicit and
-//! documented at the iterator type level.
-//!
-//! For in-place or overlapping mutation, specialised methods such as
-//! [`AudioSamples::apply_to_frames`], [`AudioSamples::apply_to_channel_data`], and
-//! [`AudioSamples::apply_to_windows`] are provided as counterparts to the
-//! read-oriented iterators defined here.
-//!
-//! Obtain an iterator by calling the corresponding method on any
-//! [`AudioSamples`] value. The method is also available through the
-//! [`AudioSampleIterators`] extension trait. Collect, chain, or consume the
-//! iterator using standard [`Iterator`] combinators.
+//! To modify samples in place, use [`AudioSamples::apply_to_frames`],
+//! [`AudioSamples::apply_to_channel_data`] and [`AudioSamples::apply_to_windows`].
 //!
 //! ```
-//! use audio_samples::{AudioSamples, sample_rate, iterators::AudioSampleIterators};
+//! use audio_samples::{AudioSampleIterators, AudioSamples, sample_rate};
 //! use ndarray::array;
 //!
 //! let audio = AudioSamples::new_multi_channel(
@@ -44,14 +44,15 @@
 //!     sample_rate!(44100),
 //! ).unwrap();
 //!
-//! // Iterate over time-aligned frames (one sample per channel per time step).
+//! // Three frames of two samples each.
+//! assert_eq!(audio.frames().count(), 3);
 //! for frame in audio.frames() {
 //!     assert_eq!(frame.num_channels().get(), 2);
 //! }
 //!
-//! // Iterate over complete channels.
+//! // Two channels of three samples each.
 //! let channels: Vec<_> = audio.channels().collect();
-//! assert_eq!(channels.len(), 2);
+//! assert_eq!(channels[1].samples_per_channel().get(), 3);
 //! ```
 
 #[cfg(feature = "editing")]

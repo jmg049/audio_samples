@@ -1,20 +1,14 @@
 //! Explanations of concepts that have no configuration type of their own.
 //!
-//! ## What
-//!
 //! Each function takes the handful of numbers that define a concept (a sample
 //! rate, a bit depth, an FFT size, a set of FIR taps, …) and returns an
 //! [`ExplainDoc`] with the formulas, the numbers they produce for those
 //! inputs, and warnings.
 //!
-//! ## Why
-//!
 //! Many syllabus topics (sampling, aliasing, quantisation, the DFT, pitch
 //! estimation, linear prediction) are not configured through a struct in this
 //! crate, but students still benefit from seeing the formula evaluated for
 //! their numbers.
-//!
-//! ## How
 //!
 //! Call the function and print or render the result. Invalid inputs (a
 //! negative sample rate, zero bits) produce a [`WarningLevel::Problem`]

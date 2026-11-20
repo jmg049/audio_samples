@@ -1,28 +1,22 @@
-//! Sample-rate conversion for [`AudioSamples`].
+//! Sample-rate conversion. [`resample`] and [`resample_by_ratio`] convert a whole
+//! buffer, and [`StreamingResampler`] converts a live source chunk by chunk. The
+//! output is time-aligned with the input and has an exact, predictable length,
+//! so later stages can compare samples across rates. Naive conversion either
+//! aliases (dropping samples) or shifts the signal in time (an uncompensated
+//! filter delay).
 //!
-//! This module converts audio between sample rates, either all at once
-//! ([`resample`], [`resample_by_ratio`]) or chunk by chunk for live sources
-//! ([`StreamingResampler`]).
+//! ```
+//! use audio_samples::operations::types::ResamplingQuality;
+//! use audio_samples::{resample, sample_rate, sine_wave};
+//! use std::time::Duration;
 //!
-//! Sample-rate conversion is needed whenever audio from different sources is
-//! combined, or when an analysis expects a fixed rate (e.g. 16 kHz speech
-//! models, 22.05 kHz music analysis). Done naively it either aliases
-//! (dropping samples) or shifts the signal in time (a filter delay that is not
-//! compensated); both corrupt any later sample-accurate comparison.
+//! let audio = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(44100), 0.5);
+//! let speech_rate = resample(&audio, sample_rate!(16000), ResamplingQuality::High).unwrap();
+//! assert_eq!(speech_rate.sample_rate().get(), 16000);
+//! assert_eq!(speech_rate.samples_per_channel().get(), 16000);
+//! ```
 //!
-//! All quality tiers except `Fast` upsampling use a Kaiser-windowed sinc
-//! interpolator evaluated at the exact rational position of every output
-//! sample: output `k` is the band-limited reconstruction of the input at time
-//! `k · in_rate / out_rate`. The filter is symmetric (linear phase) and centred
-//! on that position, so the output is time-aligned with the input (no delay to
-//! trim), input before the start and after the end is treated as zeros (so the
-//! tail is flushed), and the output always has exactly
-//! `ceil(n · out_rate / in_rate)` samples. The filter cut-off is placed just
-//! below the Nyquist frequency of the lower of the two rates, so downsampling
-//! is anti-aliased and upsampling is anti-imaged. [`resample`] computes in the
-//! sample type's float type ([`AudioSample::Float`]: `f32` for `u8`, `i16`,
-//! `I24` and `f32`, `f64` for `i32` and `f64`), reading the input in place and
-//! writing the output buffer directly; [`StreamingResampler`] computes in `f64`.
+//! ## Quality
 //!
 //! | Quality | Passband edge | Stopband | Use |
 //! |---|---|---|---|
@@ -32,54 +26,60 @@
 //! | `High` | 0.913 · Nyquist | 125 dB from Nyquist | analysis |
 //! | `VeryHigh` | 0.95-0.996 · Nyquist (see below) | 185 dB from Nyquist | masters, measurement |
 //!
-//! (Nyquist of the lower of the two rates.) `VeryHigh`'s passband reaches
+//! Nyquist is that of the lower of the two rates. `VeryHigh`'s passband reaches
 //! 0.95 · Nyquist for decimation by a power of two, 0.98 for the other
 //! ratios with terms that have no prime factor above 7 (including 1 : 2),
 //! and 0.996 for every other ratio, such as pitch shifts and 44100 Hz to
 //! 44101 Hz, where the long filter runs by FFT at little extra cost (it is
-//! flat to 2e-11 at 0.995 · Nyquist). Conversion by a ratio `L / M`
-//! (in lowest terms) whose terms have no prime factor above 7, such as
-//! 22050 Hz to 16000 or 8000 Hz, 16000 Hz to 22050 Hz or 44100 Hz to
-//! 48000 Hz, runs block by block in the frequency domain: each block of input
-//! is transformed, its bins below the lower Nyquist frequency are multiplied
-//! by the filter's response and transformed back with `L / M` times as many
-//! points (the bins above set to zero when upsampling), which gives the
-//! filtered signal at the exact output positions. That is the filter
-//! evaluated directly, except that its response above the lower Nyquist
-//! frequency (below the stopband attenuation) is dropped rather than aliased
-//! into the band or left as images. Other ratios run in two stages: the low-pass with
-//! the passband, transition band and attenuation above at the input rate or
-//! twice it, evaluated by FFT, then a short interpolator (12-48 taps, 30 dB
-//! more attenuation) from that rate to the exact output positions. 1 : 2
-//! upsampling and decimation by a power of two up to 64 are the first stage
-//! alone. The interpolator has one exact filter phase per
-//! output phase when the ratio `L / M` (in lowest terms) has at most 2^15
-//! output phases, otherwise a table of 4096 phases per sample, linearly
-//! interpolated (quadratically for `VeryHigh`, whose stopband is beyond
-//! linear interpolation's error). Ratios whose low-pass is longer than 2^16
-//! taps (decimation by more than ~700 : 1 at `High`) run as one filter evaluated directly (exact phases for
-//! small `L`, otherwise the interpolated table). Filters and tables are cached
-//! per thread (a few recent ratios, bounded in size). Ratios needing a table of
-//! more than 2^25 coefficients (decimation by more than ~10^5 : 1) are
-//! rejected with an error.
+//! flat to 2e-11 at 0.995 · Nyquist).
 //!
-//! # Output length and rates
+//! ## Conventions
 //!
-//! The output length `ceil(n * out_rate / in_rate)` is computed in exact integer
-//! arithmetic (96000 samples for 88200 samples from 44100 Hz to 48000 Hz, where
-//! a floating-point ceiling can give 96001). Sample rates are integers, and the
-//! output amplitude is not rescaled by the rate ratio.
+//! - Output `k` is the band-limited reconstruction of the input at time
+//!   `k · in_rate / out_rate`. The filter is linear phase and centred on that
+//!   position, so there is no delay to trim. Input before the start and after the
+//!   end is treated as zeros, so the tail is flushed.
+//! - The output has exactly `ceil(n · out_rate / in_rate)` samples per channel,
+//!   computed in integer arithmetic (96000 samples for 88200 samples from
+//!   44100 Hz to 48000 Hz, where a floating-point ceiling can give 96001).
+//!   Sample rates are integers, and the amplitude is not rescaled by the rate
+//!   ratio ([`resample_scaled`] applies a gain).
+//! - [`resample`] computes in the [analysis float](crate#precision) of the sample
+//!   type, reading the input in place and writing the output directly.
+//!   [`StreamingResampler`] computes in `f64`.
 //!
-//! ```
-//! use audio_samples::{AudioSamples, resample, sample_rate};
-//! use audio_samples::operations::types::ResamplingQuality;
-//! use ndarray::Array1;
+//! ## How it works
 //!
-//! let x = Array1::from_iter((0..44100).map(|i| (i as f64 * 0.01).sin()));
-//! let audio = AudioSamples::new_mono(x, sample_rate!(44100)).unwrap();
-//! let y = resample(&audio, sample_rate!(16000), ResamplingQuality::High).unwrap();
-//! assert_eq!(y.samples_per_channel().get(), 16000);
-//! ```
+//! Every quality tier except `Fast` upsampling uses a Kaiser-windowed sinc
+//! interpolator evaluated at the exact rational position of every output sample,
+//! with the cut-off just below the Nyquist frequency of the lower rate, so
+//! downsampling is anti-aliased and upsampling anti-imaged.
+//!
+//! Conversion by a ratio `L / M` (in lowest terms) whose terms have no prime factor
+//! above 7, such as 22050 Hz to 16000 or 8000 Hz, 16000 Hz to 22050 Hz or 44100 Hz
+//! to 48000 Hz, runs block by block in the frequency domain: each block of input is
+//! transformed, its bins below the lower Nyquist frequency are multiplied by the
+//! filter's response and transformed back with `L / M` times as many points (the
+//! bins above set to zero when upsampling), which gives the filtered signal at the
+//! exact output positions. That is the filter evaluated directly, except that its
+//! response above the lower Nyquist frequency (below the stopband attenuation) is
+//! dropped rather than aliased into the band or left as images.
+//!
+//! Other ratios run in two stages: the low-pass with the passband, transition band
+//! and attenuation above at the input rate or twice it, evaluated by FFT, then a
+//! short interpolator (12-48 taps, 30 dB more attenuation) from that rate to the
+//! exact output positions. 1 : 2 upsampling and decimation by a power of two up to
+//! 64 are the first stage alone. The interpolator has one exact filter phase per
+//! output phase when the ratio `L / M` (in lowest terms) has at most 2^15 output
+//! phases, otherwise a table of 4096 phases per sample, linearly interpolated
+//! (quadratically for `VeryHigh`, whose stopband is beyond linear interpolation's
+//! error). Ratios whose low-pass is longer than 2^16 taps (decimation by more than
+//! ~700 : 1 at `High`) run as one filter evaluated directly (exact phases for small
+//! `L`, otherwise the interpolated table).
+//!
+//! Filters and tables are cached per thread (a few recent ratios, bounded in size).
+//! Ratios needing a table of more than 2^25 coefficients (decimation by more than
+//! ~10^5 : 1) are rejected with an error.
 
 use crate::{
     AudioFloat, AudioSample, AudioSampleError, AudioSampleResult, AudioSamples,

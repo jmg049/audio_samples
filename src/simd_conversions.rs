@@ -1,18 +1,36 @@
-//! SIMD-optimized audio sample conversions.
+//! Sample-format conversion and interleaving on plain slices.
 //!
-//! This module provides faster, vectorized helpers for:
-//! - converting between common sample types
-//! - interleaving and deinterleaving planar/interleaved buffers
+//! Use these functions at the edges of a pipeline, where audio arrives or leaves
+//! as a flat buffer (a device callback, a file codec). Inside the crate, prefer
+//! [`AudioTypeConversion::to_format`](crate::AudioTypeConversion::to_format) and
+//! [`AudioSamples::from_interleaved_vec`](crate::AudioSamples::from_interleaved_vec)
+//! / [`to_interleaved_vec`](crate::AudioSamples::to_interleaved_vec), which do the
+//! same work on [`AudioSamples`](crate::AudioSamples).
 //!
-//! ## Feature gating
-//! Most SIMD conversion routines are behind the `simd` crate feature.
-//! When the `simd` feature is disabled, [`convert`] falls back to a scalar implementation.
+//! ```rust
+//! use audio_samples::simd_conversions::{convert, interleave_stereo};
 //!
-//! ## Conversion semantics
-//! The high-level [`convert`] API matches the semantics of the crate's
-//! [`ConvertTo`] conversions (clamp + asymmetric scale + round half away from
-//! zero for float → int, and the inverse asymmetric scaling for int → float,
-//! so int → float → int is lossless).
+//! // Same scaling as `ConvertTo`: 1.0 maps to i16::MAX, -1.0 to i16::MIN.
+//! let float = [1.0f32, -1.0, 0.0, 0.5];
+//! let mut pcm = [0i16; 4];
+//! convert(&float, &mut pcm).unwrap();
+//! assert_eq!(pcm, [i16::MAX, i16::MIN, 0, 16384]);
+//!
+//! // Planar [L0, L1, R0, R1] to interleaved [L0, R0, L1, R1].
+//! let mut interleaved = [0i16; 4];
+//! interleave_stereo(&pcm, &mut interleaved).unwrap();
+//! assert_eq!(interleaved, [i16::MAX, 0, i16::MIN, 16384]);
+//! ```
+//!
+//! ## How it works
+//!
+//! [`convert`] follows the rules of [`ConvertTo`] (clamp, asymmetric scale, round
+//! half away from zero for float to integer; the inverse scaling for integer to
+//! float, so integer to float to integer is lossless). With the `simd` feature,
+//! `f32` to `i16`, `i16` to `f32` and `f32` to `i32` run eight samples at a time
+//! and other pairs use a scalar loop; without the feature, every pair uses an
+//! unrolled scalar loop. Interleaving is pure data movement, so its functions use the same scalar
+//! code in every build; the compiler vectorises the copies.
 
 use std::num::NonZeroU32;
 
@@ -308,8 +326,8 @@ where
 
 /// High-level conversion function.
 ///
-/// Automatically chooses between SIMD and scalar implementations based on
-/// feature flags and runtime detection.
+/// Uses the vectorised implementation with the `simd` feature and the
+/// unrolled scalar one without it.
 ///
 /// # Arguments
 /// - `input`: source samples

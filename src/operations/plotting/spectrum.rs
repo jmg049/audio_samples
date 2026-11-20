@@ -1,3 +1,8 @@
+//! Magnitude spectrum plots: [`create_magnitude_spectrum_plot`] and
+//! [`MagnitudeSpectrumPlot`], the magnitude of each FFT bin of one frame or a whole
+//! signal, with a configurable FFT size and frequency range
+//! ([`MagnitudeSpectrumParams`]).
+
 use plotly::common::Mode;
 use plotly::layout::Axis;
 use plotly::{Layout, Plot, Scatter};
@@ -12,7 +17,7 @@ use crate::{AudioSampleResult, AudioSamples, StandardSample};
 /// Configuration parameters for magnitude spectrum plot generation.
 ///
 /// # Purpose
-/// Encapsulates all settings required to compute and visualize a magnitude spectrum from
+/// Encapsulates all settings required to compute and visualise a magnitude spectrum from
 /// audio samples, including FFT size, windowing, amplitude scale (linear or dB), and
 /// frequency range filtering.
 ///
@@ -55,10 +60,10 @@ impl MagnitudeSpectrumParams {
     ///
     /// Constructs a parameter set with decibel amplitude scaling, automatic FFT size selection
     /// (next power of 2 >= signal length), and no frequency range filtering. This is the most
-    /// common configuration for analyzing frequency content with a perceptually meaningful scale.
+    /// common configuration for analysing frequency content with a perceptually meaningful scale.
     ///
     /// # Returns
-    /// A [`MagnitudeSpectrumParams`] instance configured for dB-scale visualization.
+    /// A [`MagnitudeSpectrumParams`] instance configured for dB-scale visualisation.
     ///
     /// # Example
     /// ```rust,no_run
@@ -85,7 +90,7 @@ impl MagnitudeSpectrumParams {
     /// inspecting raw magnitude values without logarithmic compression.
     ///
     /// # Returns
-    /// A [`MagnitudeSpectrumParams`] instance configured for linear-scale visualization.
+    /// A [`MagnitudeSpectrumParams`] instance configured for linear-scale visualisation.
     ///
     /// # Example
     /// ```rust,no_run
@@ -256,7 +261,7 @@ impl PlotComponent for MagnitudeSpectrumPlot {
 /// Supports frequency range filtering and automatic FFT size selection.
 ///
 /// # Arguments
-/// * `audio` - The audio data to analyze. Multi-channel audio is automatically converted to
+/// * `audio` - The audio data to analyse. Multi-channel audio is automatically converted to
 ///   mono by averaging all channels.
 /// * `params` - Configuration parameters controlling FFT size, amplitude scale (linear or dB),
 ///   frequency range, and plot styling.

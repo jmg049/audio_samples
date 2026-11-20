@@ -1,55 +1,32 @@
 //! Rhythm analysis: onset strength, onset detection, tempograms, tempo estimation,
 //! dynamic-programming beat tracking and predominant local pulse.
 //!
-//! ## What
+//! This is the recommended path for onsets, tempo and beats (see
+//! [Choosing between overlapping APIs](crate::operations#choosing-between-overlapping-apis)
+//! for how it differs from [`AudioOnsetDetection`](crate::AudioOnsetDetection) and
+//! [`AudioBeatTracking`](crate::operations::AudioBeatTracking)). Onset strength is a
+//! spectral flux of a log-power mel spectrogram; tempo comes from an autocorrelation
+//! tempogram with a log-normal prior, and beats from dynamic programming. Each
+//! [`AudioRhythm`] method has a free-function counterpart that takes a precomputed
+//! envelope or spectrogram:
 //!
-//! This module provides the [`AudioRhythm`] trait and the free functions it is built
-//! from:
+//! | Method | On an envelope or spectrogram | Computes |
+//! |---|---|---|
+//! | [`AudioRhythm::onset_strength`] / [`AudioRhythm::onset_strength_multi`] | [`onset_strength_from_db`], [`onset_strength_multi_from_db`] | Spectral-flux onset strength, overall or per frequency band |
+//! | [`AudioRhythm::onset_detect`] | [`onset_detect_from_envelope`], [`peak_pick`], [`onset_backtrack`] | Onset frames |
+//! | [`AudioRhythm::tempogram`] / [`AudioRhythm::fourier_tempogram`] | [`tempogram_from_envelope`], [`fourier_tempogram_from_envelope`] | Autocorrelation and Fourier tempograms; bin tempos from [`tempo_frequencies`] / [`fourier_tempo_frequencies`] |
+//! | [`AudioRhythm::tempo`] | [`tempo_from_envelope`], [`tempo_from_tempogram`] | Tempo in BPM, global or per frame |
+//! | [`AudioRhythm::beat_track`] | [`beat_track_from_envelope`], [`beat_track_with_bpm`] | Dynamic-programming beat tracking |
+//! | [`AudioRhythm::plp`] | [`plp_from_envelope`] | Predominant local pulse |
+//! | [`AudioRhythm::tempogram_ratio`] | [`tempogram_ratio_from_tempogram`] | Tempogram energy at metrical ratios of the tempo |
+//! | [`AudioRhythm::hybrid_tempogram`] | [`hybrid_tempogram_from_envelope`] | Geometric mean of the two tempograms |
+//! | – | [`metrogram`] | Tempogram energy at metrical multiples of a tempo per frame |
 //!
-//! | Item | Computes |
-//! |---|---|
-//! | [`AudioRhythm::onset_strength`] / [`AudioRhythm::onset_strength_multi`] ([`onset_strength_from_db`], [`onset_strength_multi_from_db`]) | Spectral-flux onset strength, overall or per frequency band |
-//! | [`peak_pick`] | Peaks of a 1-D envelope by local maximum, local mean and wait rules |
-//! | [`AudioRhythm::onset_detect`] ([`onset_detect_from_envelope`]) | Onset frames |
-//! | [`onset_backtrack`] | Onsets moved back to the preceding energy minimum |
-//! | [`tempo_frequencies`] / [`fourier_tempo_frequencies`] | The BPM of each tempogram bin |
-//! | [`AudioRhythm::tempogram`] / [`AudioRhythm::fourier_tempogram`] ([`tempogram_from_envelope`], [`fourier_tempogram_from_envelope`]) | Autocorrelation and Fourier tempograms |
-//! | [`AudioRhythm::tempo`] ([`tempo_from_envelope`], [`tempo_from_tempogram`]) | Tempo in BPM, global or per frame |
-//! | [`AudioRhythm::beat_track`] ([`beat_track_from_envelope`], [`beat_track_with_bpm`]) | Dynamic-programming beat tracking |
-//! | [`AudioRhythm::plp`] ([`plp_from_envelope`]) | Predominant local pulse |
-//! | [`AudioRhythm::tempogram_ratio`] ([`tempogram_ratio_from_tempogram`]) | Tempogram energy at metrical ratios of the tempo |
-//! | [`AudioRhythm::hybrid_tempogram`] ([`hybrid_tempogram_from_envelope`]) | Geometric mean of the two tempograms |
-//! | [`metrogram`] | Tempogram energy at metrical multiples of a tempo per frame |
-//!
-//! ## Why
-//!
-//! The [`AudioOnsetDetection`](crate::AudioOnsetDetection) and
-//! [`AudioBeatTracking`](crate::operations::AudioBeatTracking) traits use their own detection
-//! functions, peak picker and a fixed-tempo beat grid. This module computes onset
-//! strength from a log-power mel spectrogram, tempo from an autocorrelation tempogram
-//! with a log-normal prior, and beats by dynamic programming. Every config has a
-//! `librosa()` constructor with librosa 1.0's defaults. `Default` gives the same
-//! values except where noted on the config ([`BeatTrackConfig`] does not trim weak
-//! beats by default).
-//!
-//! ## How
-//!
-//! Bring [`AudioRhythm`] into scope and call it on any [`AudioSamples`]. Frame-wise
-//! outputs are `(channels, ..., n_frames)` arrays (one row block per channel); event
-//! outputs ([`AudioRhythm::onset_detect`], [`AudioRhythm::beat_track`]) need mono
-//! audio and return frame indices in a [`FrameEvents`], which converts them to
-//! samples or seconds. The `*_from_*` free functions accept a precomputed envelope or
-//! spectrogram.
-//!
-//! The precision of the frame-wise outputs follows the input: onset envelopes,
-//! tempograms (including the complex Fourier tempogram), PLP pulses and the
-//! tempogram variants have the element type
-//! [`AudioSample::Float`](crate::AudioSample::Float) of the sample type, and the
-//! computation runs in that type. `u8`, `i16`, `I24` and `f32` audio gives `f32`;
-//! `i32` and `f64` audio gives `f64`. The free functions are generic over the
-//! element type ([`AudioFloat`]: `f32` or `f64`) of their envelope or spectrogram.
-//! Tempo estimates are BPM values taken from the `f64` grid of [`tempo_frequencies`]
-//! and stay `f64` for every input type; event outputs are frame indices.
+//! Configs follow the crate's [configuration](crate#configuration) convention;
+//! [`BeatTrackConfig`]'s `Default` does not trim weak beats, unlike its `librosa()`
+//! preset. Event outputs ([`AudioRhythm::onset_detect`], [`AudioRhythm::beat_track`])
+//! are frame indices in a [`FrameEvents`], which converts them to samples or
+//! seconds.
 //!
 //! ```rust
 //! use audio_samples::operations::rhythm::{AudioRhythm, BeatTrackConfig, OnsetDetectConfig};
@@ -75,13 +52,16 @@
 //!
 //! ## Conventions
 //!
+//! - Frame-wise outputs (onset envelopes, tempograms, PLP pulses) follow the
+//!   [precision rule](crate#precision) and the [array layout](crate#array-layout).
+//!   Tempo estimates are BPM values from the `f64` grid of [`tempo_frequencies`]
+//!   and stay `f64` for every sample type.
 //! - The mel basis behind [`OnsetStrengthConfig`] is computed in `f64` and rounded
 //!   to the output type once.
-//! - For `f32` input the autocorrelation tempogram (and so the tempo estimate, the
-//!   tempogram ratio and the hybrid tempogram) runs in `f32`.
-//! - Event detectors take 1-D (mono) input.
+//! - Event detectors take mono input.
 //! - Empty envelopes, [`onset_backtrack`] with no events and tempos too fast for one
 //!   frame per beat give an empty result or a [`ParameterError`].
+//!
 
 use std::num::NonZeroUsize;
 

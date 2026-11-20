@@ -1,3 +1,35 @@
+//! Audio buffers whose frame count, and for multi-channel buffers channel count,
+//! are const generic parameters.
+//!
+//! [`FixedSizeAudioSamples<T, N>`] holds `N` mono frames and
+//! [`FixedSizeMultiChannelAudioSamples<T, N, C>`] holds `N` frames of `C`
+//! channels. Use them where the block size is fixed when the program is written,
+//! such as the processing block of a streaming pipeline, so that the size is part
+//! of a function's signature. Both dereference to [`AudioSamples`], so every
+//! operation is available on them, and [`swap`](FixedSizeAudioSamples::swap)
+//! exchanges two buffers without copying (double buffering). The samples are
+//! stored on the heap, like any other `AudioSamples`.
+//!
+//! ```rust
+//! use audio_samples::{FixedSizeAudioSamples, FixedSizeMultiChannelAudioSamples, sample_rate};
+//!
+//! let mut front: FixedSizeAudioSamples<f32, 512> = FixedSizeAudioSamples::zeros(sample_rate!(48000));
+//! let mut back = FixedSizeAudioSamples::<f32, 512>::zeros(sample_rate!(48000));
+//! back[0] = 1.0;
+//! front.swap(&mut back);
+//! assert_eq!(front[0], 1.0);
+//! assert_eq!(front.samples_per_channel().get(), 512);
+//!
+//! let stereo = FixedSizeMultiChannelAudioSamples::<f32, 256, 2>::zeros(sample_rate!(48000));
+//! assert_eq!(stereo.capacity(), 512);
+//! ```
+//!
+//! ## Limitations
+//!
+//! The size is fixed at construction. Mutable access goes through
+//! `AudioSamples`, so an in-place operation that changes the length (trimming,
+//! padding, resampling) leaves a buffer whose length no longer matches `N`.
+
 use core::num::{NonZeroU32, NonZeroUsize};
 use std::ops::{Deref, DerefMut};
 

@@ -1,32 +1,21 @@
-//! Linear Prediction Coding (LPC) primitives for the SILK-style (Opus-inspired) speech mode.
+//! Linear prediction for the SILK-style mode: Levinson-Durbin LPC from the
+//! windowed autocorrelation of a frame, the analysis filter that produces the
+//! prediction residual, the synthesis filter that inverts it, pitch estimation and
+//! single-tap long-term prediction (LTP).
 //!
-//! ## What
-//!
-//! Implements the Levinson-Durbin algorithm for computing LPC coefficients from
-//! the windowed autocorrelation of a signal frame, together with the matching
-//! analysis (residual computation) and synthesis (reconstruction) filters.
-//!
-//! ## Why
-//!
-//! SILK, the speech-oriented half of Opus, models the vocal-tract as an all-pole
-//! filter `H(z) = G / A(z)` where `A(z)` is the LPC polynomial. The encoder
-//! transmits the LPC coefficients and the prediction residual; the decoder runs
-//! the synthesis filter to recover the original waveform. This module provides
-//! all the building blocks that `silk.rs` needs.
-//!
-//! ## Round-trip correctness
-//!
-//! When both encoder and decoder use **zero initial state** at the start of each
-//! frame the analysis/synthesis pair forms a perfect inverse:
+//! SILK models the vocal tract as an all-pole filter `H(z) = G / A(z)`, with `A(z)`
+//! the LPC polynomial. The encoder keeps the coefficients and the residual; the
+//! decoder runs the synthesis filter. With the same initial state on both sides,
+//! analysis and synthesis are exact inverses:
 //!
 //! ```text
 //! Analysis:  e[n] = x[n] + Σ_{k=0}^{p-1} a[k] · x[n-1-k]
 //! Synthesis: y[n] = e[n] - Σ_{k=0}^{p-1} a[k] · y[n-1-k]
 //! ```
 //!
-//! Substituting: `y[0] = e[0] = x[0]`, `y[1] = e[1] - a[0]·y[0] = x[1]`, etc.
-//! The reconstruction is exact up to floating-point precision; quantization of
-//! the residual is the only lossy step.
+//! so `y[0] = e[0] = x[0]`, `y[1] = e[1] − a[0]·y[0] = x[1]`, and so on, up to
+//! floating-point rounding. Quantising the residual is the only lossy step. The
+//! `*_stateful` variants carry the filter memory from one frame to the next.
 
 use std::num::{NonZeroU32, NonZeroUsize};
 
@@ -280,7 +269,7 @@ pub fn lpc_residual(samples: &[f32], coeffs: &LpcCoefficients) -> Vec<f32> {
 /// Computes: `y[n] = e[n] - Σ_{k=0}^{order-1} coeffs[k] · y[n-1-k]`
 ///
 /// This is the exact inverse of [`lpc_residual`] when both use zero initial
-/// state. The only reconstruction error comes from quantizing the residual
+/// state. The only reconstruction error comes from quantising the residual
 /// in the SILK encode step.
 ///
 /// # Arguments
@@ -392,7 +381,7 @@ pub fn lpc_synthesis_stateful(
 
 /// Estimates the pitch period and long-term prediction (LTP) gain for a frame.
 ///
-/// Searches the normalized autocorrelation of `samples` in the lag range
+/// Searches the normalised autocorrelation of `samples` in the lag range
 /// `[T_min, T_max]` where:
 ///
 /// - `T_min = sample_rate / 500` (≈ 500 Hz maximum pitch)
@@ -510,7 +499,7 @@ mod tests {
     use super::*;
 
     /// Verifies that the analysis/synthesis pair is a perfect inverse (no
-    /// quantization) when both use zero initial state.
+    /// quantisation) when both use zero initial state.
     #[test]
     fn round_trip_no_quantization() {
         let samples: Vec<f32> = (0..64)

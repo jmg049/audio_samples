@@ -1,90 +1,17 @@
-//! Constant-Q and variable-Q transforms, their inverse, and the chroma /
-//! tonnetz features built on them.
+//! Constant-Q and variable-Q transforms, their inverse, and the chroma and tonnetz
+//! features built on them: the [`AudioConstantQ`] trait and its free functions.
 //!
-//! ## What
-//!
-//! A constant-Q transform (CQT) analyses a signal with a bank of filters whose
-//! centre frequencies are geometrically spaced (a fixed number of bins per octave)
-//! and whose bandwidths are proportional to their centre frequencies, so every
-//! filter has the same quality factor `Q`. Musical pitches map onto bins directly,
-//! which makes the CQT the natural time-frequency representation for tonal
-//! analysis. The variable-Q transform (VQT) widens the low-frequency filters by an
-//! offset `gamma` (in Hz) for better time resolution there.
-//!
-//! This module provides the [`AudioConstantQ`] trait and the free functions it is
-//! built from:
-//!
-//! | Operation | Items |
-//! |---|---|
-//! | Constant-Q and variable-Q transforms | [`AudioConstantQ::cqt`] / [`AudioConstantQ::vqt`] |
-//! | Pseudo and hybrid CQT | [`AudioConstantQ::pseudo_cqt`] / [`AudioConstantQ::hybrid_cqt`] |
-//! | Inverse CQT and Griffin-Lim reconstruction | [`AudioConstantQ::icqt`] / [`AudioConstantQ::griffinlim_cqt`] |
-#![cfg_attr(
-    feature = "feature-extraction",
-    doc = r#" | Constant-Q chroma, CENS and variable-Q chroma | [`AudioConstantQ::chroma_cqt`] / [`AudioConstantQ::chroma_cens`] / [`AudioConstantQ::chroma_vqt`] |"#
-)]
-#![cfg_attr(
-    not(feature = "feature-extraction"),
-    doc = r#" | Constant-Q chroma, CENS and variable-Q chroma (requires the `feature-extraction` feature) | `AudioConstantQ::chroma_cqt` / `AudioConstantQ::chroma_cens` / `AudioConstantQ::chroma_vqt` |"#
-)]
-#![cfg_attr(
-    feature = "feature-extraction",
-    doc = r#" | Tonal centroids | [`AudioConstantQ::tonnetz`] ([`tonnetz_from_chroma`]) |"#
-)]
-#![cfg_attr(
-    not(feature = "feature-extraction"),
-    doc = r#" | Tonal centroids (requires the `feature-extraction` feature) | `AudioConstantQ::tonnetz` (`tonnetz_from_chroma`) |"#
-)]
-//! | Constant-Q to chroma mapping | [`cq_to_chroma`] |
-//! | Wavelet filters and their lengths | [`wavelet`] / [`wavelet_lengths`] |
-//!
-//! ## Why
-//!
-//! [`AudioTransforms::constant_q_transform`](crate::AudioTransforms::constant_q_transform)
-//! delegates to the `spectrograms` crate, whose CQT uses a different kernel design,
-//! normalisation and time alignment (its values differ from this module's by
-//! several percent and it returns fewer frames). This module implements the
-//! recursive, per-octave CQT with wavelet filters, the form chroma and tonnetz
-//! features are usually computed from. Every config struct has a `librosa()`
-#![cfg_attr(
-    feature = "feature-extraction",
-    doc = r#" preset. `Default` is the same except for [`ChromaCqtConfig`] (and the"#
-)]
-#![cfg_attr(
-    not(feature = "feature-extraction"),
-    doc = r#" preset. `Default` is the same except for `ChromaCqtConfig` (and the"#
-)]
-#![cfg_attr(
-    feature = "feature-extraction",
-    doc = r#" [`ChromaCensConfig`] and [`TonnetzConfig`] built on it), whose default fixes"#
-)]
-#![cfg_attr(
-    not(feature = "feature-extraction"),
-    doc = r#" `ChromaCensConfig` and `TonnetzConfig` built on it, all with the `feature-extraction` feature), whose default fixes"#
-)]
-//! the tuning at A440 instead of estimating it from the signal.
-//!
-//! ## How
-//!
-//! Bring [`AudioConstantQ`] into scope and call it on any [`AudioSamples`]. Outputs
-//! are `(channels, n_bins, n_frames)` arrays (complex for the transforms, real for
-//! magnitudes and features); mono input gives one channel. Frame `t` is centred on
-//! sample `t * hop_length`, as in every other frame-wise feature of the crate.
-//!
-//! The output precision follows the input: the element type is the sample
-//! type's [`AudioSample::Float`](crate::AudioSample::Float). `u8`, `i16`, `I24`
-//! and `f32` audio gives `f32` (or `Complex<f32>`); `i32` and `f64` audio gives
-//! `f64`. The framing, FFTs and filter products run in that type. The filter
-//! bases (wavelets, their spectra, the chroma mapping) are computed in `f64` and
-//! rounded to the output type once. [`AudioConstantQ::icqt`] and
-//! [`AudioConstantQ::griffinlim_cqt`] return audio of the receiver's sample type.
-//!
-//! The per-octave resampling uses [`crate::resample`]'s filters in the same
-//! float type, reading the signal in place and writing its output directly.
+//! A constant-Q transform (CQT) analyses a signal with filters whose centre
+//! frequencies are geometrically spaced (a fixed number of bins per octave) and
+//! whose bandwidths are proportional to their centre frequencies, so every filter
+//! has the same quality factor `Q`. Musical pitches map onto bins directly, which
+//! makes the CQT the natural time-frequency representation for tonal analysis. The
+//! variable-Q transform (VQT) widens the low-frequency filters by an offset `gamma`
+//! (in Hz) for better time resolution there.
 //!
 //! ```rust
-//! use audio_samples::operations::constant_q::{AudioConstantQ, ChromaCqtConfig, CqtConfig};
-//! use audio_samples::{AudioSamples, sample_rate, sine_wave};
+//! # #[cfg(feature = "feature-extraction")] {
+//! use audio_samples::{AudioConstantQ, ChromaCqtConfig, CqtConfig, sample_rate, sine_wave};
 //! use std::time::Duration;
 //!
 //! let audio = sine_wave::<f64>(440.0, Duration::from_millis(500), sample_rate!(22050), 0.5);
@@ -101,17 +28,71 @@
 //! let chroma = audio.chroma_cqt(&ChromaCqtConfig::default().with_tuning(Some(0.0))).unwrap();
 //! assert_eq!(chroma.dim(), (1, 12, 22));
 //! assert!((chroma[[0, 9, 10]] - 1.0).abs() < 1e-12);
+//! # }
 //! ```
 //!
-//! ## Resampling between octaves
+//! | Operation | Items |
+//! |---|---|
+//! | Constant-Q and variable-Q transforms | [`AudioConstantQ::cqt`], [`AudioConstantQ::vqt`] |
+//! | Pseudo and hybrid CQT | [`AudioConstantQ::pseudo_cqt`], [`AudioConstantQ::hybrid_cqt`] |
+//! | Inverse CQT and Griffin-Lim reconstruction | [`AudioConstantQ::icqt`], [`AudioConstantQ::griffinlim_cqt`] |
+#![cfg_attr(
+    feature = "feature-extraction",
+    doc = r#" | Constant-Q chroma, CENS and variable-Q chroma | [`AudioConstantQ::chroma_cqt`], [`AudioConstantQ::chroma_cens`], [`AudioConstantQ::chroma_vqt`] |"#
+)]
+#![cfg_attr(
+    not(feature = "feature-extraction"),
+    doc = r#" | Constant-Q chroma, CENS and variable-Q chroma | `AudioConstantQ::chroma_cqt`, `AudioConstantQ::chroma_cens`, `AudioConstantQ::chroma_vqt` |"#
+)]
+#![cfg_attr(
+    feature = "feature-extraction",
+    doc = r#" | Tonal centroids | [`AudioConstantQ::tonnetz`] ([`tonnetz_from_chroma`]) |"#
+)]
+#![cfg_attr(
+    not(feature = "feature-extraction"),
+    doc = r#" | Tonal centroids | `AudioConstantQ::tonnetz` (`tonnetz_from_chroma`) |"#
+)]
+//! | Constant-Q to chroma mapping | [`cq_to_chroma`] |
+//! | Wavelet filters and their lengths | [`wavelet`], [`wavelet_lengths`] |
 //!
-//! The recursive (per-octave) algorithm halves the sample rate between octaves
-//! with the crate's own windowed-sinc resampler ([`crate::resample`]) at the
-//! quality selected by [`CqtConfig::resampling_quality`] (default `High`). The
-//! top octave is computed at the input rate; the decimated octaves carry the
-//! resampler's error, about 1e-4 of the peak magnitude. Frequencies other than
-//! equal-tempered bins (just intonation, for example) are taken by
-//! [`vqt_with_intervals`].
+//! The CQT of [`AudioTransforms`](crate::AudioTransforms) uses a different kernel;
+//! see [Choosing between overlapping APIs](crate::operations#choosing-between-overlapping-apis).
+//!
+//! ## How it works
+//!
+//! The recursive algorithm computes the top octave at the input rate, then halves
+//! the sample rate between octaves with the crate's windowed-sinc resampler
+//! ([`resample`](crate::resample)) at the quality set by
+//! [`CqtConfig::resampling_quality`] (default `High`), so low bins get long
+//! windows without long FFTs. The decimated octaves carry the resampler's error,
+//! about 1e-4 of the peak magnitude. Frequencies other than equal-tempered bins
+//! (just intonation, for example) are available through [`vqt_with_intervals`].
+//!
+//! ## Conventions
+//!
+//! - Outputs follow the crate's [array layout](crate#array-layout) (complex for the
+//!   transforms, real for magnitudes and features) and
+//!   [precision rule](crate#precision). The filter bases (wavelets, their spectra,
+//!   the chroma mapping) are computed in `f64` and rounded once.
+//!   [`AudioConstantQ::icqt`] and [`AudioConstantQ::griffinlim_cqt`] return audio
+//!   of the receiver's sample type.
+#![cfg_attr(
+    feature = "feature-extraction",
+    doc = r#" - `Default` equals `librosa()` except for [`ChromaCqtConfig`] and the"#
+)]
+#![cfg_attr(
+    not(feature = "feature-extraction"),
+    doc = r#" - `Default` equals `librosa()` except for `ChromaCqtConfig` and the"#
+)]
+#![cfg_attr(
+    feature = "feature-extraction",
+    doc = r#"   [`ChromaCensConfig`] and [`TonnetzConfig`] built on it, whose default fixes"#
+)]
+#![cfg_attr(
+    not(feature = "feature-extraction"),
+    doc = r#"   `ChromaCensConfig` and `TonnetzConfig` built on it, whose default fixes"#
+)]
+//!   the tuning at A440 instead of estimating it from the signal.
 
 use std::num::NonZeroUsize;
 
@@ -339,7 +320,7 @@ impl WaveletConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -1179,7 +1160,7 @@ impl CqtConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()
@@ -1347,7 +1328,7 @@ impl VqtConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self {
@@ -2521,7 +2502,7 @@ impl ChromaVqtConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()

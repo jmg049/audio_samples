@@ -1,33 +1,50 @@
-//! IIR (Infinite Impulse Response) filter design and application.
+//! IIR filters: Butterworth, Chebyshev type I and II, elliptic and Bessel designs
+//! in low-pass, high-pass, band-pass and band-stop form, applied causally or with
+//! zero phase (`filtfilt`), as the methods of [`AudioIirFiltering`]. For
+//! block-by-block processing with state carried between blocks, design once into
+//! a [`SosFilter`]; [`IirFilter`] runs arbitrary `(b, a)` coefficients.
 //!
-//! ## What
+//! ```
+//! use audio_samples::{AudioIirFiltering, nzu, sample_rate, sine_wave};
+//! use std::time::Duration;
 //!
-//! This module provides:
+//! // A 4th-order low-pass at 1 kHz keeps 200 Hz and removes 8 kHz.
+//! let low = sine_wave::<f32>(200.0, Duration::from_millis(200), sample_rate!(44100), 0.5);
+//! let high = sine_wave::<f32>(8000.0, Duration::from_millis(200), sample_rate!(44100), 0.5);
+//! let peak = |a: &[f32]| a[4410..].iter().fold(0.0f32, |m, x| m.max(x.abs()));
 //!
-//! - [`IirFilter`] - a stateful direct-form filter for arbitrary `(b, a)`
-//!   coefficients.
-//! - [`SosFilter`] - a stateful cascade of second-order sections, the
-//!   numerically robust representation used for every designed filter.
-//! - The [`AudioIirFiltering`] implementation for [`AudioSamples`], which
-//!   designs and applies Butterworth, Chebyshev Type I, Chebyshev Type II,
-//!   Bessel and elliptic filters in low-pass, high-pass, band-pass and
-//!   band-stop form, plus zero-phase forward-backward filtering.
+//! let kept = low.butterworth_lowpass(nzu!(4), 1000.0).unwrap();
+//! let removed = high.butterworth_lowpass(nzu!(4), 1000.0).unwrap();
+//! assert!(peak(kept.as_slice().unwrap()) > 0.49);
+//! assert!(peak(removed.as_slice().unwrap()) < 0.001);
+//! ```
 //!
-//! ## Why
+//! The same design as a streaming filter, processing a buffer in blocks:
 //!
-//! IIR filters reach a given roll-off with far fewer operations than FIR
-//! filters, which makes them the standard tool for tone shaping, rumble and
-//! hiss removal, band limiting and crossover design.
+//! ```
+//! use audio_samples::SosFilter;
+//! use audio_samples::nzu;
+//! use audio_samples::operations::types::IirFilterDesign;
 //!
-//! ## How
+//! let design = IirFilterDesign::butterworth_lowpass(nzu!(4), 1000.0);
+//! let mut filter = SosFilter::from_design(&design, 44100.0).unwrap();
+//! let mut block = vec![1.0f64; 256];
+//! filter.process_block(&mut block); // state carries over to the next block
+//! assert!(block[255] > 0.99); // the step response settles at unity DC gain
+//! ```
 //!
-//! Designs follow the classic analog-prototype pipeline: normalised analog
-//! prototype → analog frequency transform → bilinear transform (with frequency
-//! pre-warping) → pairing into second-order sections, each pole pair with its
-//! nearest zeros. The golden-fixture tests in `tests/filter_reference.rs` check
-//! the coefficients and the filtered output against reference designs.
+//! ## How it works
 //!
-//! | `IirFilterDesign` | Filter |
+//! Designs follow the analog-prototype method: a normalised analog prototype, an
+//! analog frequency transformation, the bilinear transform with frequency
+//! pre-warping (so the cutoff lands exactly where requested), and pairing into
+//! second-order sections, each pole pair with its nearest zeros. Second-order
+//! sections keep high-order filters numerically stable. The section coefficients
+//! agree with standard reference designs to 1e-10 of the largest coefficient.
+//!
+//! A design is described by an [`IirFilterDesign`]:
+//!
+//! | Constructor | Filter |
 //! |---|---|
 //! | `butterworth_lowpass(N, fc)` | Order-`N` Butterworth low-pass, -3 dB at `fc` |
 //! | `chebyshev_i(resp, N, fc, rp)` | Order-`N` Chebyshev type I, `rp` dB passband ripple, `-rp` dB at `fc` |
@@ -35,18 +52,15 @@
 //! | `elliptic(resp, N, fc, rp, rs)` | Order-`N` elliptic, `rp` dB ripple and `rs` dB attenuation |
 //! | `bessel(resp, N, fc)` | Order-`N` Bessel, magnitude-normalised: -3 dB at `fc` |
 //!
-//! Integer sample types are converted to `f64` for filtering and converted
-//! back afterwards; results that exceed full scale are clamped.
+//! ## Conventions
 //!
-//! ```
-//! use audio_samples::operations::iir_filtering::IirFilter;
+//! Samples are filtered in `f64`; integer sample types are converted to full scale
+//! and back, and results beyond full scale are clamped. Causal filtering starts
+//! from zero state. `filtfilt` extends the signal at both ends by odd reflection
+//! and starts each pass from the filter's steady state for the first sample, so
+//! it has no start-up transient.
 //!
-//! // First-order moving-average: y[n] = 0.5*x[n] + 0.5*x[n-1]
-//! let mut filter = IirFilter::new(vec![0.5, 0.5], vec![1.0]);
-//! let output = filter.process_samples(&[1.0, 1.0, 1.0, 1.0]);
-//! assert_eq!(output[0], 0.5); // 0.5*1.0 + 0.5*0.0 (initial delay is zero)
-//! assert_eq!(output[1], 1.0); // 0.5*1.0 + 0.5*1.0 (steady state)
-//! ```
+//! [`IirFilterDesign`]: crate::operations::types::IirFilterDesign
 
 use std::num::NonZeroUsize;
 

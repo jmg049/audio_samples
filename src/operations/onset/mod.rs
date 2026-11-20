@@ -1,88 +1,27 @@
-//! Onset detection for identifying transient events in audio signals.
+//! Onset detection with constant-Q detection functions: [`AudioOnsetDetection`]
+//! and its configurations.
 //!
-//! # What
+//! An onset is the start of a note, a percussive hit or another transient. Each
+//! detector computes an onset detection function (ODF), one value per analysis
+//! frame that rises sharply at an onset, then picks its peaks ([`pick_peaks`]) and
+//! returns onset times in seconds. For most uses,
+#![cfg_attr(
+    feature = "beat-tracking",
+    doc = r#" [`AudioRhythm::onset_detect`](crate::AudioRhythm::onset_detect) is the recommended"#
+)]
+#![cfg_attr(
+    not(feature = "beat-tracking"),
+    doc = r#" `AudioRhythm::onset_detect` (feature `beat-tracking`) is the recommended"#
+)]
+//! detector (see [Choosing between overlapping APIs](crate::operations#choosing-between-overlapping-apis)).
 //!
-//! Algorithms that locate *onsets* - the beginnings of notes, percussive hits or
-//! other transients - and return their times in seconds. Each detector has two
-//! stages: an **onset detection function** (ODF), one value per analysis frame
-//! that rises sharply at an onset, followed by **peak picking**
-//! ([`pick_peaks`]).
-//!
-//! # Why
-//!
-//! Onset detection underlies beat tracking, tempo estimation, rhythm analysis
-//! and transcription. An onset changes the short-time spectrum abruptly (new
-//! energy appears across many bins), so frame-to-frame spectral differences
-//! make a good ODF.
-//!
-//! # How
-//!
-//! All detectors use a constant-Q transform (CQT) with hop H samples
-//! (frame t is centred at `t·H/f_s` seconds). Write X\[b,t\] for the CQT value
-//! of bin b in frame t. The ODFs below are computed exactly as written
-//! (all sums over bins b, `ODF[0] = 0`):
-//!
-//! - [`AudioOnsetDetection::onset_detection_function`] ("energy" ODF) and
-//!   [`SpectralFluxMethod::Energy`]: `Σ max(0, |X[b,t]| − |X[b,t−1]|)`
-//!   (no squaring);
-//! - [`SpectralFluxMethod::Magnitude`]: `Σ abs(|X[b,t]| − |X[b,t−1]|)`
-//!   (not rectified: decreases count too);
-//! - [`SpectralFluxMethod::Complex`]: `Σ |X[b,t] − X[b,t−1]|` (complex
-//!   difference, so phase changes count);
-//! - [`SpectralFluxMethod::RectifiedComplex`]: `Σ max(0, |X[b,t]| − |X[b,t−1]|)`
-//!   (phase discarded; equal to the energy flux);
-//! - [`AudioOnsetDetection::onset_detection_function_complex`]:
-//!   `w_m·Σ R(|X[b,t]| − |X[b,t−1]|) + w_p·Σ |princarg(Δφ[b,t] − 2π·f_b·H/f_s)|`,
-//!   optionally log-compressed.
-//!
-//! The half-wave-rectified magnitude difference is the standard *spectral flux*:
-//! only increases in level count, so note offsets do not create onsets. The
-//! "Energy" variants do **not** square the magnitudes; pass a power
-//! spectrogram to [`flux::energy_flux`] if a true energy flux is wanted. In the
-//! complex method, R is rectification or absolute value and the phase term
-//! measures how far each bin's phase advance departs from that of its centre
-//! frequency f_b (see [`complex::phase_deviation`]); it is not the
-//! second-difference phase deviation of Bello et al. (2005).
-//!
-//! Post-processing: the energy ODF optionally zeroes values below
-//! `adaptive_threshold_multiplier × running median` (length
-//! `median_filter_length` frames); the spectral-flux ODF is optionally
-//! rectified and log-compressed (`ln(1 + C·x)`). Peak picking then applies
-//! [`PeakPickingConfig`]: pre-emphasis, an optional running median,
-//! normalisation, an adaptive threshold, local-maximum detection and a
-//! minimum separation, **all measured in frames**. Onset frame indices are
-//! converted to seconds as `t·H/f_s`.
-//!
-//! # Limitations
-//!
-//! - The default [`PeakPickingConfig`] is sized in frames (9-frame threshold
-//!   window, 3-frame separation, no median filter) and finds the onsets of a
-//!   clean click track, but its threshold never drops below 0.1 of the
-//!   strongest (normalised) ODF peak, so much weaker onsets in the same clip
-//!   are missed; lower `adaptive_threshold.min_threshold` for material with a
-//!   wide dynamic range.
-//! - The CQT response of the external `spectrograms` crate to identical clicks
-//!   varies strongly from click to click (up to ~100×, alternating), so
-//!   weaker clicks can fall below any threshold and tempo estimates built on
-//!   the ODF can show octave errors.
-//! - Reported times are frame centres and may precede the true onset by a
-//!   fraction of the CQT window (about 30 ms in the example below).
-//!
-//! The module provides three main configuration types:
-//! - [`OnsetDetectionConfig`] - Energy-based onset detection using CQT magnitude
-//! - [`SpectralFluxConfig`] - Spectral flux methods (energy, magnitude, complex, rectified)
-//! - [`ComplexOnsetConfig`] - Combined magnitude and phase deviation analysis
-//!
-//! Each configuration offers presets for common use cases (percussive, musical, speech).
-//!
-//! ## Submodules
-//!
-//! - [`complex`] - Complex domain onset detection functions (magnitude + phase)
-//! - [`filters`] - Signal processing utilities (median filter, rectification, compression)
-//! - [`flux`] - Spectral flux computation kernels
-//! - [`kernels`] - Low-level DSP kernels for onset detection
-//!
-//! # Example
+//! Three configurations select the detection function: [`OnsetDetectionConfig`]
+//! (the energy ODF of the CQT magnitude), [`SpectralFluxConfig`] (the
+//! [`SpectralFluxMethod`] variants) and [`ComplexOnsetConfig`] (magnitude and
+//! phase). `OnsetDetectionConfig` and `ComplexOnsetConfig` have `percussive`,
+//! `musical` and `speech` presets; `SpectralFluxConfig` has `percussive` and
+//! `musical`. Each preset takes the sample rate, because its peak-picking windows
+//! are set in seconds and converted to frames at the preset's hop size.
 //!
 //! ```
 //! use audio_samples::{AudioSamples, sample_rate};
@@ -121,6 +60,60 @@
 //!     assert!((t - truth).abs() < 0.05, "onset {t:.3} s vs {truth} s");
 //! }
 //! ```
+//!
+//! ## Definitions
+//!
+//! All detectors use a constant-Q transform (CQT) with hop H samples
+//! (frame t is centred at `t·H/f_s` seconds). Write X\[b,t\] for the CQT value
+//! of bin b in frame t. The ODFs below are computed exactly as written
+//! (all sums over bins b, `ODF[0] = 0`):
+//!
+//! - [`AudioOnsetDetection::onset_detection_function`] ("energy" ODF) and
+//!   [`SpectralFluxMethod::Energy`]: `Σ max(0, |X[b,t]| − |X[b,t−1]|)`
+//!   (no squaring);
+//! - [`SpectralFluxMethod::Magnitude`]: `Σ abs(|X[b,t]| − |X[b,t−1]|)`
+//!   (not rectified: decreases count too);
+//! - [`SpectralFluxMethod::Complex`]: `Σ |X[b,t] − X[b,t−1]|` (complex
+//!   difference, so phase changes count);
+//! - [`SpectralFluxMethod::RectifiedComplex`]: `Σ max(0, |X[b,t]| − |X[b,t−1]|)`
+//!   (phase discarded; equal to the energy flux);
+//! - [`AudioOnsetDetection::onset_detection_function_complex`]:
+//!   `w_m·Σ R(|X[b,t]| − |X[b,t−1]|) + w_p·Σ |princarg(Δφ[b,t] − 2π·f_b·H/f_s)|`,
+//!   optionally log-compressed.
+//!
+//! The half-wave-rectified magnitude difference is the standard *spectral flux*:
+//! only increases in level count, so note offsets do not create onsets. The
+//! "Energy" variants do **not** square the magnitudes; pass a power
+//! spectrogram to [`flux::energy_flux`] if a true energy flux is wanted. In the
+//! complex method, R is rectification or absolute value and the phase term
+//! measures how far each bin's phase advance departs from that of its centre
+//! frequency f_b (see [`complex::phase_deviation`]); it is not the
+//! second-difference phase deviation of Bello et al. (2005).
+//!
+//! Post-processing: the energy ODF optionally zeroes values below
+//! `adaptive_threshold_multiplier × running median` (length
+//! `median_filter_length` frames); the spectral-flux ODF is optionally
+//! rectified and log-compressed (`ln(1 + C·x)`). Peak picking then applies
+//! [`PeakPickingConfig`]: pre-emphasis, an optional running median,
+//! normalisation, an adaptive threshold, local-maximum detection and a
+//! minimum separation, **all measured in frames**. Onset frame indices are
+//! converted to seconds as `t·H/f_s`.
+//!
+//! ## Limitations
+//!
+//! - The default [`PeakPickingConfig`] is sized in frames (9-frame threshold
+//!   window, 3-frame separation, no median filter) and finds the onsets of a
+//!   clean click track, but its threshold never drops below 0.1 of the
+//!   strongest (normalised) ODF peak, so much weaker onsets in the same clip
+//!   are missed; lower `adaptive_threshold.min_threshold` for material with a
+//!   wide dynamic range.
+//! - The CQT response of the external `spectrograms` crate to identical clicks
+//!   varies strongly from click to click (up to ~100×, alternating), so
+//!   weaker clicks can fall below any threshold and tempo estimates built on
+//!   the ODF can show octave errors.
+//! - Reported times are frame centres and may precede the true onset by a
+//!   fraction of the CQT window (about 30 ms in the example above).
+//!
 
 pub mod complex;
 pub mod filters;
@@ -157,7 +150,7 @@ use crate::{
 ///
 /// Encapsulates all settings required for energy-based onset detection, including CQT parameters,
 /// hop size, thresholding strategy, and peak picking configuration. This method detects onsets by
-/// analyzing sudden increases in spectral energy across frequency bands.
+/// analysing sudden increases in spectral energy across frequency bands.
 ///
 /// # Intended Usage
 ///
@@ -297,9 +290,9 @@ impl OnsetDetectionConfig {
         (frame_index as f64 * self.hop_size.get() as f64) / sample_rate
     }
 
-    /// Creates a configuration optimized for percussive onset detection.
+    /// Creates a configuration optimised for percussive onset detection.
     ///
-    /// Optimized for detecting drum hits, percussion, and other sharp transient events.
+    /// Optimised for detecting drum hits, percussion, and other sharp transient events.
     /// Uses higher threshold, shorter minimum interval, and pre-emphasis to highlight transients.
     ///
     /// # Configuration Details
@@ -319,7 +312,7 @@ impl OnsetDetectionConfig {
     ///
     /// # Returns
     ///
-    /// A [`OnsetDetectionConfig`] instance optimized for percussive content.
+    /// A [`OnsetDetectionConfig`] instance optimised for percussive content.
     ///
     /// # Example
     ///
@@ -356,9 +349,9 @@ impl OnsetDetectionConfig {
         )
     }
 
-    /// Creates a configuration optimized for musical onset detection.
+    /// Creates a configuration optimised for musical onset detection.
     ///
-    /// Optimized for detecting note onsets in tonal musical instruments (piano, guitar, strings).
+    /// Optimised for detecting note onsets in tonal musical instruments (piano, guitar, strings).
     /// Uses moderate threshold, longer minimum interval for typical musical phrasing, and less
     /// pre-emphasis to preserve tonal content.
     ///
@@ -379,7 +372,7 @@ impl OnsetDetectionConfig {
     ///
     /// # Returns
     ///
-    /// A [`OnsetDetectionConfig`] instance optimized for musical content.
+    /// A [`OnsetDetectionConfig`] instance optimised for musical content.
     ///
     /// # Example
     ///
@@ -416,9 +409,9 @@ impl OnsetDetectionConfig {
         )
     }
 
-    /// Creates a configuration optimized for speech onset detection.
+    /// Creates a configuration optimised for speech onset detection.
     ///
-    /// Optimized for detecting word and syllable onsets in speech. Uses lower threshold to
+    /// Optimised for detecting word and syllable onsets in speech. Uses lower threshold to
     /// capture subtle speech dynamics, moderate minimum interval for typical speech rate, and
     /// minimal pre-emphasis to preserve speech clarity.
     ///
@@ -439,7 +432,7 @@ impl OnsetDetectionConfig {
     ///
     /// # Returns
     ///
-    /// A [`OnsetDetectionConfig`] instance optimized for speech content.
+    /// A [`OnsetDetectionConfig`] instance optimised for speech content.
     ///
     /// # Example
     ///
@@ -652,7 +645,7 @@ impl SpectralFluxConfig {
         }
     }
 
-    /// Creates a configuration optimized for percussive onset detection.
+    /// Creates a configuration optimised for percussive onset detection.
     ///
     /// Uses energy-based flux with high compression for detecting drum hits and other sharp
     /// transient events. Rectification is enabled to focus on energy increases.
@@ -665,7 +658,7 @@ impl SpectralFluxConfig {
     ///
     /// # Returns
     ///
-    /// A [`SpectralFluxConfig`] instance optimized for percussive content.
+    /// A [`SpectralFluxConfig`] instance optimised for percussive content.
     ///
     /// # Example
     ///
@@ -690,7 +683,7 @@ impl SpectralFluxConfig {
         }
     }
 
-    /// Creates a configuration optimized for musical onset detection.
+    /// Creates a configuration optimised for musical onset detection.
     ///
     /// Uses magnitude-based flux with moderate compression for detecting note onsets in tonal
     /// instruments. Provides good sensitivity to subtle attacks while maintaining robustness.
@@ -703,7 +696,7 @@ impl SpectralFluxConfig {
     ///
     /// # Returns
     ///
-    /// A [`SpectralFluxConfig`] instance optimized for musical content.
+    /// A [`SpectralFluxConfig`] instance optimised for musical content.
     ///
     /// # Example
     ///
@@ -728,14 +721,14 @@ impl SpectralFluxConfig {
         }
     }
 
-    /// Creates a configuration optimized for complex domain onset detection.
+    /// Creates a configuration optimised for complex domain onset detection.
     ///
     /// Uses complex flux (magnitude + phase) without rectification for maximum sensitivity to
     /// spectral changes. Best for polyphonic music with complex timbres.
     ///
     /// # Returns
     ///
-    /// A [`SpectralFluxConfig`] instance optimized for complex domain analysis.
+    /// A [`SpectralFluxConfig`] instance optimised for complex domain analysis.
     ///
     /// # Example
     ///
@@ -884,7 +877,7 @@ impl ComplexOnsetConfig {
         }
     }
 
-    /// Creates a configuration optimized for percussive onset detection.
+    /// Creates a configuration optimised for percussive onset detection.
     ///
     /// Emphasizes magnitude changes (0.8) over phase (0.2) for detecting sharp transients like
     /// drum hits. Uses high compression and shorter hop size for temporal precision.
@@ -897,7 +890,7 @@ impl ComplexOnsetConfig {
     ///
     /// # Returns
     ///
-    /// A [`ComplexOnsetConfig`] instance optimized for percussive content.
+    /// A [`ComplexOnsetConfig`] instance optimised for percussive content.
     ///
     /// # Example
     ///
@@ -924,7 +917,7 @@ impl ComplexOnsetConfig {
         }
     }
 
-    /// Creates a configuration optimized for musical onset detection.
+    /// Creates a configuration optimised for musical onset detection.
     ///
     /// Balances magnitude (0.6) and phase (0.4) contributions for detecting note onsets in tonal
     /// instruments. Phase information helps capture subtle attacks and pitch changes.
@@ -937,7 +930,7 @@ impl ComplexOnsetConfig {
     ///
     /// # Returns
     ///
-    /// A [`ComplexOnsetConfig`] instance optimized for musical content.
+    /// A [`ComplexOnsetConfig`] instance optimised for musical content.
     ///
     /// # Example
     ///
@@ -964,7 +957,7 @@ impl ComplexOnsetConfig {
         }
     }
 
-    /// Creates a configuration optimized for speech onset detection.
+    /// Creates a configuration optimised for speech onset detection.
     ///
     /// Uses equal weights for magnitude and phase (0.5 each) to capture both energy changes and
     /// formant transitions. `phase_rectify` is `false` (which has no effect, see the field docs).
@@ -977,7 +970,7 @@ impl ComplexOnsetConfig {
     ///
     /// # Returns
     ///
-    /// A [`ComplexOnsetConfig`] instance optimized for speech content.
+    /// A [`ComplexOnsetConfig`] instance optimised for speech content.
     ///
     /// # Example
     ///

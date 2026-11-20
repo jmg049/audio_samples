@@ -1,34 +1,38 @@
-//! Signal processing operations for audio samples.
+//! Sample-level processing: normalisation, gain, DC removal, clipping, windowing,
+//! FIR filtering by convolution, μ-law companding and first-order low-, high- and
+//! band-pass filters, as the methods of [`AudioProcessing`]. For steeper filters,
+//! use [`AudioIirFiltering`]. With the `resampling` feature the trait also has
+#![cfg_attr(
+    feature = "resampling",
+    doc = r#" [`resample`](AudioProcessing::resample) and [`resample_by_ratio`](AudioProcessing::resample_by_ratio)."#
+)]
+#![cfg_attr(
+    not(feature = "resampling"),
+    doc = r#" `resample` and `resample_by_ratio`."#
+)]
 //!
-//! ## What
+//! ```
+//! use audio_samples::{AudioProcessing, AudioStatistics, NormalizationConfig, sample_rate, sine_wave};
+//! use std::time::Duration;
 //!
-//! This module provides the [`AudioProcessing`] trait implementation for
-//! [`AudioSamples`]: normalization, gain (`scale`), DC removal, clipping,
-//! windowing, FIR filtering by convolution (`apply_filter`), μ-law
-//! companding, first-order low/high/band-pass filters and (with the
-//! `resampling` feature) sample-rate conversion. Each transforming operation
-//! has an in-place primitive (`op_in_place(&mut self, …)`) and a non-mutating
-//! twin (`op(&self, …)`, provided by the trait default) that clones then
-//! mutates - enabling both zero-allocation in-place pipelines and fluent
-//! method chaining.
+//! let tone = sine_wave::<f32>(440.0, Duration::from_millis(100), sample_rate!(8000), 0.25);
+//! let louder = tone
+//!     .scale(2.0) // infallible: returns Self
+//!     .normalize(NormalizationConfig::peak(0.9)) // fallible: returns a Result
+//!     .unwrap();
+//! assert!((louder.peak() - 0.9).abs() < 1e-6);
+//! ```
 //!
-//! ## Why
+//! ## Conventions
 //!
-//! Audio signals routinely need amplitude adjustment, spectral shaping and
-//! offset removal before playback or further analysis. A single trait keeps
-//! the API discoverable and composable across all supported sample types.
+//! Gains, fades and peak normalisation are computed in `f64`. For integer sample
+//! types they act on the full-scale `[-1, 1]` range, and the result is rounded and
+//! saturated back to the integer range. Window and FIR coefficients are `f64` for
+//! every sample type ([`apply_window_f64`](AudioProcessing::apply_window_f64),
+//! [`apply_filter_f64`](AudioProcessing::apply_filter_f64)), and every operation
+//! returns audio of the input's sample type.
 //!
-//! ## How
-//!
-//! Import [`AudioProcessing`] and call methods directly on an [`AudioSamples`]
-//! value. The infallible [`AudioProcessing::scale`] returns `Self` directly,
-//! so it can be chained directly before fallible calls which return
-//! [`AudioSampleResult`]. Gains, fades and peak normalisation are computed in
-//! `f64`; for integer sample types they act on the normalised `[-1, 1]` scale
-//! and the result is rounded and saturated back to the integer range.
-//! Window and FIR coefficients are given as `f64` for every sample type
-//! ([`AudioProcessing::apply_window_f64`], [`AudioProcessing::apply_filter_f64`]),
-//! and every operation returns audio in the input's sample type.
+//! ## Concepts
 //!
 //! ### Convolution: full and valid
 //!
@@ -39,13 +43,12 @@
 //! For an input of `N` samples the *full* convolution (all `n` where the
 //! signal and the taps overlap at all, treating samples outside the input as
 //! zero) has `N + M − 1` samples; this is what `AudioTransforms::convolve`
-//! returns (feature `transforms`). The *valid* part keeps only the
-//! `N − M + 1` outputs for which all `M` taps fall inside the input; this is
-//! what [`AudioProcessing::apply_filter`] returns, so its output is shorter
-//! than its input. Valid output index `i` corresponds to `n = i + M − 1` in
-//! the formula above. Above 160 taps
-//! `apply_filter` switches from direct summation (O(N·M)) to FFT convolution
-//! (O(N log N)); both give the same result up to rounding.
+//! returns. The *valid* part keeps only the `N − M + 1` outputs for which all
+//! `M` taps fall inside the input; this is what [`AudioProcessing::apply_filter`]
+//! returns, so its output is shorter than its input. Valid output index `i`
+//! corresponds to `n = i + M − 1` in the formula above. With the `transforms`
+//! feature, filters of 160 taps or more use FFT convolution (O(N log N)) instead
+//! of direct summation (O(N·M)); both give the same result up to rounding.
 //!
 //! ```
 //! use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
@@ -70,31 +73,6 @@
 //! samples. An arbitrary FIR (for example `[1.0, 0.5]`) has a group delay
 //! that varies with frequency. `apply_filter` does not compensate the delay.
 //!
-//! ### First-order low-, high- and band-pass filters
-//!
-//! [`low_pass_filter`](AudioProcessing::low_pass_filter),
-//! [`high_pass_filter`](AudioProcessing::high_pass_filter) and
-//! [`band_pass_filter`](AudioProcessing::band_pass_filter) are first-order
-//! Butterworth designs made with the bilinear transform (the order-1 case of
-//! the Butterworth filters of `AudioIirFiltering`). They are not ideal
-//! "brick-wall" filters,
-//! which are not realisable. With `fs` the sample rate, `f` the frequency in
-//! Hz and `Ω = tan(π f / fs)` the pre-warped frequency, the magnitude
-//! responses are
-//!
-//! - low-pass, cutoff `fc`, `Ωc = tan(π fc / fs)`:
-//!   `|H(f)|² = 1 / (1 + (Ω/Ωc)²)`
-//! - high-pass: `|H(f)|² = 1 / (1 + (Ωc/Ω)²)`
-//! - band-pass, edges `fl < fh` (`Ωl`, `Ωh` pre-warped):
-//!   `|H(f)|² = 1 / (1 + ((Ω² − Ωl·Ωh) / (Ω·(Ωh − Ωl)))²)`
-//!
-//! Each is −3 dB (`|H|² = 1/2`) at its cutoff or band edges, and rolls off at
-//! 6 dB/octave well beyond them, so a band-pass still passes noticeable
-//! energy just outside its band (about −7 to −8 dB one octave out). The low-pass
-//! has a zero at the Nyquist frequency and the high-pass a zero at DC. For
-//! steeper slopes use the `butterworth_*`, `chebyshev_*` or `elliptic`
-//! designs of [`AudioIirFiltering`] with a higher order.
-//!
 //! ### DC removal
 //!
 //! [`remove_dc_offset`](AudioProcessing::remove_dc_offset) subtracts the
@@ -105,17 +83,30 @@
 //! sets how fast a changing offset is followed (time constant about
 //! `1/(2π fc)` seconds).
 //!
-//! ```
-//! use audio_samples::{AudioSamples, AudioProcessing, sample_rate};
-//! use ndarray::array;
+//! ## Definitions
 //!
-//! let audio = AudioSamples::new_mono(array![2.0f32, -3.0, 1.5], sample_rate!(44100))
-//!     .unwrap()
-//!     .scale(0.5)              // infallible - returns Self
-//!     .clip(-1.0, 1.0)        // fallible - returns Result<Self>
-//!     .unwrap();
-//! assert!(audio[0] <= 1.0);
-//! ```
+//! ### First-order filters
+//!
+//! [`low_pass_filter`](AudioProcessing::low_pass_filter),
+//! [`high_pass_filter`](AudioProcessing::high_pass_filter) and
+//! [`band_pass_filter`](AudioProcessing::band_pass_filter) are first-order
+//! Butterworth designs made with the bilinear transform (the order-1 case of
+//! the Butterworth filters of [`AudioIirFiltering`]). With `fs` the sample
+//! rate, `f` the frequency in Hz and `Ω = tan(π f / fs)` the pre-warped
+//! frequency, the magnitude responses are
+//!
+//! - low-pass, cutoff `fc`, `Ωc = tan(π fc / fs)`:
+//!   `|H(f)|² = 1 / (1 + (Ω/Ωc)²)`
+//! - high-pass: `|H(f)|² = 1 / (1 + (Ωc/Ω)²)`
+//! - band-pass, edges `fl < fh` (`Ωl`, `Ωh` pre-warped):
+//!   `|H(f)|² = 1 / (1 + ((Ω² − Ωl·Ωh) / (Ω·(Ωh − Ωl)))²)`
+//!
+//! Each is −3 dB (`|H|² = 1/2`) at its cutoff or band edges, and rolls off at
+//! 6 dB/octave well beyond them, so a band-pass passes noticeable
+//! energy just outside its band (about −7 to −8 dB one octave out). The low-pass
+//! has a zero at the Nyquist frequency and the high-pass a zero at DC. For
+//! steeper slopes use the `butterworth_*`, `chebyshev_*` or `elliptic`
+//! designs of [`AudioIirFiltering`] with a higher order.
 
 use crate::operations::traits::AudioIirFiltering;
 #[cfg(feature = "resampling")]

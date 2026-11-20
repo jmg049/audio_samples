@@ -1,51 +1,57 @@
-//! Opus-inspired teaching codec: SILK-style (speech), CELT-style (music), and Hybrid modes.
+//! A teaching codec with the structure of Opus: a SILK-style speech mode, a
+//! CELT-style music mode and a hybrid of the two.
 //!
-//! ## Overview
+//! It follows the SILK/CELT/hybrid layout of RFC 6716 and is built on the
+//! [perceptual codec](crate::codecs::perceptual) framework. **It is not the Opus
+//! codec and is not bitstream compatible with Opus:** there is no range coder, no
+//! LSF/NLSF quantisation, no PVQ or band-energy coding as in CELT, and no noise
+//! shaping. Its CELT mode is a generic perceptual MDCT codec, and its mode decision
+//! is a simple heuristic ([`detect_mode`](crate::codecs::opus::mode::detect_mode)).
+//! Use it to study the structure of a hybrid speech and music codec, not to
+//! produce or decode `.opus` data.
 //!
-//! An Opus-inspired teaching codec modelled on the SILK/CELT/Hybrid structure of
-//! RFC 6716, built on the `audio_samples` perceptual codec framework. **It is not
-//! the Opus codec and is not bitstream compatible with Opus:** there is no range
-//! coder, no LSF/NLSF quantisation, no PVQ or band-energy coding as in CELT, and
-//! no noise shaping. Its "CELT" mode is a generic perceptual MDCT codec, and its
-//! mode decision is a simple heuristic (see [`detect_mode`](crate::codecs::opus::mode::detect_mode)),
-//! not libopus's. Use it to study the structure of a hybrid speech/music codec, not
-//! to produce or decode `.opus` data. It is gated on the `opus-codec` feature flag.
+//! [`OpusCodec`](crate::codecs::opus::OpusCodec) cuts mono audio into fixed-length
+//! frames and codes each with the mode set in
+//! [`OpusConfig`](crate::codecs::opus::OpusConfig), or the one detected per frame;
+//! [`OpusStereoCodec`](crate::codecs::opus::OpusStereoCodec) codes two channels as
+//! mid and side. Encoded audio is an in-memory structure.
 //!
-//! | Module | Purpose |
-//! |--------|---------|
-//! | [`lpc`](crate::codecs::opus::lpc) | Levinson-Durbin LPC analysis/synthesis, pitch estimation, LTP primitives. |
-//! | [`mode`](crate::codecs::opus::mode) | `OpusMode`, `OpusBandwidth`, `OpusConfig`, and `detect_mode`. |
-//! | [`silk`](crate::codecs::opus::silk) | SILK frame encode/decode: stateful LPC + LTP + 16-bit quantisation. |
-//! | [`celt`](crate::codecs::opus::celt) | CELT frame encode/decode: delegates to the psychoacoustic pipeline. |
-//! | [`hybrid`](crate::codecs::opus::hybrid) | Hybrid mode: SILK low band + CELT high band with IIR crossover. |
-//! | [`stereo`](crate::codecs::opus::stereo) | M/S stereo codec [`OpusStereoCodec`](crate::codecs::opus::OpusStereoCodec). |
-//! | [`codec`](crate::codecs::opus::codec) | [`OpusCodec`](crate::codecs::opus::OpusCodec) and [`OpusEncodedAudio`](crate::codecs::opus::OpusEncodedAudio) - the public entry points. |
+//! ```rust
+//! use audio_samples::codecs::opus::{OpusCodec, OpusConfig, OpusMode};
+//! use audio_samples::codecs::{decode, encode};
+//! use audio_samples::{sample_rate, sine_wave};
+//! use spectrograms::WindowType;
+//! use std::time::Duration;
 //!
-//! ## Design
+//! let audio = sine_wave::<f32>(440.0, Duration::from_millis(100), sample_rate!(48000), 0.5);
 //!
-//! - **CELT** uses the [`crate::codecs::perceptual`] pipeline:
-//!   MDCT → psychoacoustic masking → bit allocation → scalar quantisation.
+//! // Music mode, 128 kbit/s.
+//! let codec = OpusCodec::new(OpusConfig::with_mode(OpusMode::Celt, 128_000), WindowType::Hanning);
+//! let encoded = encode(&audio, codec).unwrap();
+//! let decoded = decode::<OpusCodec, f32>(encoded).unwrap();
+//! assert_eq!(decoded.samples_per_channel(), audio.samples_per_channel());
+//! ```
 //!
-//! - **SILK** uses the LPC primitives in [`lpc`](crate::codecs::opus::lpc) with cross-frame state and a
-//!   single-tap long-term predictor (LTP).
+//! ## How it works
 //!
-//! - **Hybrid** splits the signal at 8 kHz via a first-order IIR crossover
-//!   (perfect reconstruction), encodes the low band with SILK and the high band
-//!   with CELT, and sums on decode.
+//! - **CELT mode** runs the perceptual pipeline per frame: MDCT, psychoacoustic
+//!   masking, bit allocation, scalar quantisation ([`celt`](crate::codecs::opus::celt)).
+//! - **SILK mode** predicts each sample from the previous ones with LPC
+//!   ([`lpc`](crate::codecs::opus::lpc)), removes the pitch periodicity with a
+//!   single-tap long-term predictor (LTP) and quantises the residual
+//!   ([`silk`](crate::codecs::opus::silk)).
+//! - **Hybrid mode** splits the signal at 8 kHz with a first-order IIR crossover
+//!   whose two bands sum back to the input exactly, codes the low band with SILK and
+//!   the high band with CELT, and sums them on decode
+//!   ([`hybrid`](crate::codecs::opus::hybrid)).
 //!
-//! - [`OpusCodec`](crate::codecs::opus::OpusCodec) segments audio into fixed-length frames and dispatches each
-//!   to SILK, CELT, or Hybrid based on [`OpusConfig`](crate::codecs::opus::OpusConfig) or per-frame detection.
+//! ## Limitations
 //!
-//! ## What belongs in the IO crate
-//!
-//! Bitstream packing (range coding, Ogg/RIFF containers) and `.opus` file I/O
-//! are responsibilities of `audio_samples_io`. This module provides only the
-//! algorithmic core: analysis, quantisation, and reconstruction.
-//!
-//! ## Remaining limitations
-//!
-//! - **No cross-frame LTP state** - LTP synthesis restarts at zero each frame.
-//! - **No range/arithmetic coding** - residuals are stored as raw `Vec<i16>`.
+//! - The LPC filter state carries across frames, but the LTP state does not: LTP
+//!   synthesis starts from zero in every frame.
+//! - There is no entropy coding: quantised values are stored as plain integers.
+//! - Frames have one length (`frame_size_ms`, 20 ms by default), and the CELT MDCT
+//!   window equals the frame length, with no short blocks for transients.
 
 pub mod celt;
 pub mod codec;

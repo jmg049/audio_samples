@@ -1,60 +1,41 @@
-//! Audio signal visualization using interactive plots.
-//! This module provides interactive HTML-based visualizations of audio signals via the
-//! [`plotly`] crate. Three core plot types are supported:
+//! Interactive plots of audio and analysis results, rendered with [`plotly`] as
+//! self-contained HTML.
 //!
-//! - **Waveform plots** - time-domain amplitude traces with optional envelope overlays,
-//!   onset markers, beat markers, and DSP feature annotations.
-//! - **Spectrogram plots** - time-frequency heatmaps from STFT, mel-scale, or CQT analysis.
-//! - **Magnitude spectrum plots** - single-frame frequency-domain views showing per-bin
-//!   magnitudes.
-//!
-//! Plots are used during audio development to debug signal-processing chains, validate
-//! onset or beat detection, compare spectral representations, and generate report
-//! figures. This module keeps all plotting code separate from the core audio
-//! abstractions; it is compiled only when the `plotting` feature is enabled.
-//!
-//! Import the [`AudioPlotting`] trait and call its methods on any [`AudioSamples`] instance.
-//! Each method returns an opaque plot object (`WaveformPlot`, `SpectrogramPlot`,
-//! `MagnitudeSpectrumPlot`) that can be rendered to HTML or saved to a file:
+//! [`AudioPlotting`] draws waveforms, spectrograms (linear, log-frequency, mel, gammatone),
+//! magnitude and phase spectra and Lissajous (stereo X-Y) plots of an
+//! [`AudioSamples`]. [`matrix`] draws any feature matrix with labelled axes, and
+//! [`CompositePlot`] arranges several plots in one document. Every plot type
+//! implements [`PlotUtils`]: `html()` returns the document, `save()` writes it
+//! (PNG and SVG need the `static-plots` feature), and with the `html_view` feature
+//! `show()` opens it in a browser.
 //!
 //! ```rust
-//! use audio_samples::{AudioSamples, sample_rate, sine_wave};
-//! use audio_samples::operations::traits::AudioPlotting;
+//! use audio_samples::operations::plotting::PlotUtils;
 //! use audio_samples::operations::plotting::waveform::WaveformPlotParams;
+//! use audio_samples::operations::traits::AudioPlotting;
+//! use audio_samples::{sample_rate, sine_wave};
 //! use std::time::Duration;
 //!
 //! let audio = sine_wave::<f64>(440.0, Duration::from_millis(100), sample_rate!(44100), 0.8);
-//! let params = WaveformPlotParams::default();
-//! let plot = audio.plot_waveform(&params).unwrap();
-//!
-//! // Save as interactive HTML
-//! // plot.save("output.html").unwrap();
+//! let plot = audio.plot_waveform(&WaveformPlotParams::default()).unwrap();
+//! let html = plot.html().unwrap();
+//! assert!(html.contains("<html"));
 //! ```
 //!
-//! Plot objects support method chaining for overlays - add RMS envelopes, onset markers,
-//! beat markers, or shaded regions after creating the base plot. For spectrogram plots,
-//! choose the spectrogram type via [`SpectrogramPlotParams`]; for magnitude spectrum plots,
-//! configure FFT size and frequency range via [`MagnitudeSpectrumParams`].
+//! Plots take overlays by method chaining: envelopes, onset and beat markers,
+//! lines and shaded regions on waveforms ([`dsp_overlays`] computes the feature
+//! tracks), and contours such as a pitch track on spectrograms.
 //!
 //! [`AudioSamples`]: crate::AudioSamples
-//! [`SpectrogramPlotParams`]: spectrograms::SpectrogramPlotParams
-//! [`MagnitudeSpectrumParams`]: spectrum::MagnitudeSpectrumParams
-/// Composite plot layouts combining multiple visualizations.
 pub mod composite;
 #[cfg(feature = "plotting")]
 pub mod dsp_overlays;
-/// Lissajous (stereo X-Y) correlation plotting.
 pub mod lissajous;
 
-/// Feature matrices and simplified waveforms.
 pub mod matrix;
-/// Phase spectrum visualization.
 pub mod phase_spectrum;
-/// Spectrogram plotting with various frequency scales and amplitude encodings.
 pub mod spectrograms;
-/// Magnitude spectrum visualization.
 pub mod spectrum;
-/// Time-domain waveform plotting with overlay support.
 pub mod waveform;
 
 pub use composite::{CompositeLayout, CompositePlot};
@@ -164,7 +145,7 @@ pub trait PlotUtils {
 /// storing every point.
 ///
 /// This is the standard technique used by professional audio software (Audacity,
-/// Pro Tools, etc.) for waveform visualization.
+/// Pro Tools, etc.) for waveform visualisation.
 ///
 /// # Arguments
 ///

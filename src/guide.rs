@@ -1,26 +1,12 @@
 //! Learning guide: a short course in speech and audio processing.
 //!
-//! Each chapter is a module that holds only documentation. Its code blocks are
-//! doctests, so every number the text claims is computed and checked by
-//! `cargo test --doc --features educational,full_no_plotting`. Every chapter has a
-//! matching runnable lab, `examples/tutorial_NN_<topic>.rs`.
+//! Each chapter is a page of this module. Its code blocks are doctests, so every
+//! number the text gives is computed and checked, and each chapter has a runnable
+//! lab, `examples/tutorial_NN_<topic>.rs`. The same chapters, with figures, are the
+//! [illustrated book](https://jmg049.github.io/audio_samples/).
 //!
-//! Built only with the `educational` and `full_no_plotting` features (both are
-//! enabled on docs.rs).
-//!
-//! The chapters are the Markdown files in `documentation/guide/`, written with
-//! plain LaTeX maths so that they also render in Markdown viewers and in the
-//! book (`book/`). `build.rs` escapes the maths for rustdoc's Markdown parser
-//! and turns the links between chapter files into intra-doc links; the pages
-//! below are those generated copies.
-//!
-//! The maths (`$…$` inline, `$$…$$` display) is rendered by KaTeX, loaded from
-//! `documentation/katex-header.html` (docs.rs passes it automatically). To get
-//! the same rendering locally, build the docs with:
-//!
-//! ```text
-//! RUSTDOCFLAGS="--html-in-header documentation/katex-header.html" cargo doc --features educational,full_no_plotting --no-deps
-//! ```
+//! The maths renders with KaTeX on docs.rs. For a local build, pass the header:
+//! `RUSTDOCFLAGS="--html-in-header documentation/katex-header.html" cargo doc --features educational,full_no_plotting --no-deps`.
 #![doc = include_str!(concat!(env!("OUT_DIR"), "/guide/README.md"))]
 
 #[doc = include_str!(concat!(env!("OUT_DIR"), "/guide/01_sampling_aliasing.md"))]

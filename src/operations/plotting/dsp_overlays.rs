@@ -1,7 +1,5 @@
-//! DSP feature overlays for plots
-//!
-//! This module provides functions to compute DSP features over sliding windows
-//! for visualization as plot overlays.
+//! Feature tracks computed over sliding windows (RMS, peak, zero-crossing rate,
+//! energy, spectral centroid and rolloff), in the form the plot overlays take.
 
 use std::num::NonZeroUsize;
 
@@ -11,7 +9,7 @@ use crate::{AudioSamples, StandardSample};
 ///
 /// Divides the input signal into overlapping frames and computes the RMS value for each frame.
 /// RMS is a measure of signal power and correlates with perceived loudness. Useful for
-/// visualizing amplitude envelopes on waveform plots.
+/// visualising amplitude envelopes on waveform plots.
 ///
 /// # Arguments
 /// * `audio` - Input audio signal (mono or multi-channel)
@@ -24,7 +22,7 @@ use crate::{AudioSamples, StandardSample};
 /// A tuple `(time_points, rms_values)` where:
 /// - `time_points` are the center times of each window in seconds
 /// - `rms_values` are the RMS amplitudes (same scale as input samples, typically 0.0-1.0 for
-///   normalized audio)
+///   normalised audio)
 ///
 /// # Example
 /// ```rust,no_run
@@ -67,7 +65,7 @@ where
 ///
 /// Divides the input signal into overlapping frames and finds the maximum absolute sample
 /// value in each frame. Peak values indicate the loudest instantaneous amplitude and are
-/// useful for visualizing dynamic range and clipping risk.
+/// useful for visualising dynamic range and clipping risk.
 ///
 /// # Arguments
 /// * `audio` - Input audio signal (mono or multi-channel)
@@ -80,7 +78,7 @@ where
 /// A tuple `(time_points, peak_values)` where:
 /// - `time_points` are the center times of each window in seconds
 /// - `peak_values` are the maximum absolute amplitudes (same scale as input samples, typically
-///   0.0-1.0 for normalized audio)
+///   0.0-1.0 for normalised audio)
 ///
 /// # Example
 /// ```rust,no_run
@@ -192,7 +190,7 @@ where
 /// # Returns
 /// A tuple `(time_points, energy_values)` where:
 /// - `time_points` are the center times of each window in seconds
-/// - `energy_values` are the squared RMS values (power, typically 0.0-1.0 for normalized audio)
+/// - `energy_values` are the squared RMS values (power, typically 0.0-1.0 for normalised audio)
 ///
 /// # Example
 /// ```rust,no_run

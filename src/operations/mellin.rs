@@ -1,23 +1,10 @@
-//! Fast Mellin (scale) transform.
+//! The fast Mellin (scale) transform. [`mellin_transform`] computes the discrete
+//! scale transform of a signal: its Fourier transform after resampling on an
+//! exponential time grid. Its magnitude does not change when the signal is
+//! stretched in time, so tempo-invariant rhythm descriptors use it, typically on an
+//! onset autocorrelation.
 //!
-//! # What
-//!
-//! [`mellin_transform`] computes the discrete scale transform of a signal: its Fourier
-//! transform after resampling on an exponential time grid.
-//!
-//! # Why
-//!
-//! The magnitude of the scale transform does not change when the signal is stretched in
-//! time. Tempo-invariant rhythm descriptors use it, typically on an onset autocorrelation.
-//!
-//! # How
-//!
-//! The signal is taken to cover `[0, 1)`. It is interpolated at points spaced geometrically
-//! from `t_min / n`, weighted by `x^beta`, and transformed with a real FFT. `beta = 0.5`
-//! is the scale transform, whose energy is preserved; other values of `beta` give other
-//! members of the Mellin family.
-//!
-//! ```
+//! ```rust
 //! use audio_samples::operations::mellin::{MellinConfig, mellin_transform};
 //! use ndarray::{Array1, Axis};
 //!
@@ -26,8 +13,18 @@
 //! assert!(m.len() > 100);
 //! ```
 //!
-//! References: L. Cohen, *The scale representation*, IEEE TSP 41, 1993; A. De Sena and
-//! D. Rocchesso, *A fast Mellin and scale transform*, EURASIP JASP 2007.
+//! ## How it works
+//!
+//! The signal is taken to cover `[0, 1)`. It is interpolated at points spaced
+//! geometrically from `t_min / n`, weighted by `x^beta`, and transformed with a
+//! real FFT. `beta = 0.5` is the scale transform, whose energy is preserved; other
+//! values of `beta` give other members of the Mellin family.
+//!
+//! ## References
+//!
+//! - L. Cohen, *The scale representation*, IEEE TSP 41, 1993.
+//! - A. De Sena and D. Rocchesso, *A fast Mellin and scale transform*, EURASIP
+//!   JASP 2007.
 
 use ndarray::{Array1, ArrayD, ArrayViewD, Axis, IxDyn, Zip};
 use num_complex::Complex;
@@ -72,7 +69,7 @@ impl MellinConfig {
         }
     }
 
-    /// Settings matching librosa 1.0's defaults; currently equal to [`new`](Self::new).
+    /// Settings matching librosa 1.0's defaults; equal to [`new`](Self::new).
     #[must_use]
     pub const fn librosa() -> Self {
         Self::new()

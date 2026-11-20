@@ -1,21 +1,14 @@
-//! Audio-domain mathematical utilities and canonical unit conversions.
+//! Unit conversions for audio: time, samples and frames; frequency, MIDI numbers and
+//! note names; mel and cents; amplitude, power and decibels.
 //!
-//! This module provides the conversions commonly needed when working with audio signals,
-//! spectral representations, and musical abstractions: between physical units (time,
-//! frequency, amplitude, power), perceptual scales (mel, decibels, cents), and symbolic
-//! musical representations (note names, MIDI numbers).
+//! The functions work on scalars (and slices, where a `_slice` variant exists) and
+//! return plain numbers or small values. Each reversible conversion has a separate
+//! inverse. Where the spectral modules use a different convention (the mel scale,
+//! decibel references), the
+//! [overlap table](crate::operations#choosing-between-overlapping-apis) says which
+//! function to use.
 //!
-//! Keeping these conversions in one module gives the crate a single definition of each.
-//! When unit handling is duplicated across pipelines or tools, small inconsistencies
-//! accumulate; making the conversions part of the public API keeps their behaviour
-//! stable and explicit.
-//!
-//! Most functions operate on scalar values and return plain numeric types or small domain
-//! objects, for use in preprocessing, analysis, visualisation, and validation. Where a
-//! conversion is reversible, its inverse is a separate function, with no shared or
-//! implicit state.
-//!
-//! # Conventions
+//! ## Conventions
 //!
 //! - **Mel scale (HTK).** [`hz_to_mel`], [`mel_to_hz`], [`mel_scale`] and
 //!   [`mel_frequencies`] use the HTK / O'Shaughnessy (1987) formula
@@ -34,27 +27,24 @@
 //!   and `operations::spectrum::power_to_db`.
 //! - **MIDI and notes.** A4 = MIDI 69 = 440 Hz, f = 440·2^((m − 69)/12); C4 = MIDI 60.
 //!
-//! # Usage
+//! ## Examples
 //!
 //! ```rust
 //! use audio_samples::utils::audio_math::{
-//!     hz_to_mel,
-//!     mel_to_hz,
-//!     amplitude_to_db,
-//!     note_to_midi,
-//!     midi_to_hz,
+//!     amplitude_to_db, hz_to_mel, mel_to_hz, midi_to_hz, note_to_midi,
 //! };
 //!
-//! // Frequency conversions between physical and perceptual scales.
-//! let mel = hz_to_mel(440.0);
-//! let hz = mel_to_hz(mel);
+//! // HTK mel: 1000 Hz is about 1000 mel, and the conversion inverts.
+//! assert!((hz_to_mel(1000.0) - 1000.0).abs() < 0.1);
+//! assert!((mel_to_hz(hz_to_mel(440.0)) - 440.0).abs() < 1e-9);
 //!
-//! // Amplitude expressed on a logarithmic scale.
-//! let db = amplitude_to_db(0.5);
+//! // Half amplitude is about -6 dB.
+//! assert!((amplitude_to_db(0.5) + 6.02).abs() < 0.01);
 //!
-//! // Musical representations.
+//! // A4 is MIDI 69, 440 Hz.
 //! let midi = note_to_midi("A4").unwrap();
-//! let freq = midi_to_hz(midi as f64);
+//! assert_eq!(midi, 69);
+//! assert_eq!(midi_to_hz(midi as f64), 440.0);
 //! ```
 
 use crate::{AudioSampleError, AudioSampleResult, NoteParseError, ParameterError};

@@ -1,55 +1,25 @@
-//! Time-domain editing operations for [`AudioSamples`].
-//!
-//! This module implements the [`AudioEditing`] trait, providing
-//! time-domain editing operations: trimming, padding, fading, mixing,
-//! concatenation, and more.
-//!
-//! Time-domain editing is the most common category of audio
-//! manipulation - crop a recording, add silence, blend two sources.
-//! Grouping all such operations behind a single trait keeps the
-//! [`AudioSamples`] API organised and separates editing logic from the
-//! core data type.
-//!
-//! All operations are available on any [`AudioSamples<T>`] where `T`
-//! is a supported sample type (`u8`, `i16`, `I24`, `i32`, `f32`,
-//! `f64`).  Most operations work on both mono and multi-channel audio
-//! transparently.
-//!
-//! ### Available operations
-//!
-//! | Method | Description |
-//! |--------|-------------|
-//! | [`reverse`](AudioEditing::reverse) | Time-reverse the signal |
-//! | [`trim`](AudioEditing::trim) | Extract a time-bounded segment |
-//! | [`pad`](AudioEditing::pad) | Add silence at start / end |
-//! | [`pad_to_duration`](AudioEditing::pad_to_duration) | Pad to a target duration |
-//! | [`split`](AudioEditing::split) | Divide into equal-length segments |
-//! | [`concatenate`](AudioEditing::concatenate) | Join segments end-to-end |
-//! | [`stack`](AudioEditing::stack) | Interleave mono sources into multi-channel |
-//! | [`mix`](AudioEditing::mix) | Weighted sum of sources |
-//! | [`fade_in`](AudioEditing::fade_in) / [`fade_out`](AudioEditing::fade_out) | Amplitude envelopes |
-//! | [`repeat`](AudioEditing::repeat) | Tile the signal |
-//! | [`trim_silence`](AudioEditing::trim_silence) | Remove leading/trailing silence |
-//! | [`trim_all_silence`](AudioEditing::trim_all_silence) | Remove all silence regions |
-//!
-//! ## Example
+//! Time-domain editing: trimming, padding, splitting, concatenating, stacking
+//! sources as channels, mixing, fading, repeating, reversing and removing silence,
+//! as the methods of [`AudioEditing`]. Most work on mono and multi-channel audio
+//! alike. To trim silence by frame energy relative to the loudest frame rather
+//! than by an absolute threshold, see
+//! [Choosing between overlapping APIs](crate::operations#choosing-between-overlapping-apis).
 //!
 //! ```rust
-//! use audio_samples::{AudioSamples, AudioEditing, sample_rate};
+//! use audio_samples::{AudioEditing, AudioSamples, sample_rate};
 //! use ndarray::Array1;
 //!
-//! let data  = Array1::<f32>::zeros(100);
-//! let audio = AudioSamples::new_mono(data, sample_rate!(100)).unwrap();
+//! // One second at 100 Hz.
+//! let audio = AudioSamples::new_mono(Array1::<f32>::zeros(100), sample_rate!(100)).unwrap();
 //!
-//! // Trim to the middle 50 % of the signal (samples 25 … 75)
+//! // Keep 0.25 s to 0.75 s: samples 25 to 74.
 //! let trimmed = audio.trim(0.25, 0.75).unwrap();
 //! assert_eq!(trimmed.samples_per_channel().get(), 50);
 //! ```
 //!
-//! ## See Also
+//! ## Conventions
 //!
-//! - [`AudioSamples`]: The core audio data type.
-//! - [`AudioEditing`]: The trait defining all editing operations.
+//! Times are in seconds and converted to samples with the audio's sample rate.
 //!
 //! [`AudioEditing`]: crate::operations::traits::AudioEditing
 

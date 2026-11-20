@@ -1,59 +1,17 @@
-//! Frame-wise pitch tracking (YIN, pYIN) and harmonic spectrogram helpers
-//! (salience, harmonic interpolation).
-//!
-//! ## What
-//!
-//! This module provides the [`AudioPitchTracking`] trait and the free functions
-//! it is built from:
-//!
-//! | Item | Computes |
-//! |---|---|
-//! | [`AudioPitchTracking::yin`] ([`yin`]) | YIN f0 per frame |
-//! | [`AudioPitchTracking::pyin`] ([`pyin`]) | pYIN f0, voiced flags and voicing probabilities |
-//! | [`salience`] | Harmonic salience of a spectrogram |
-//! | [`interp_harmonics`] | A spectrogram interpolated at harmonics of each bin |
-//! | [`f0_harmonics`] | A spectrogram interpolated at harmonics of an f0 track |
-//!
-//! ## Why
-//!
-//! [`AudioPitchAnalysis`](crate::AudioPitchAnalysis) offers single-buffer pitch
-//! detection and a pitch contour with its own conventions (frames start at sample 0,
-//! unvoiced frames are `None`, mono only). This module works frame by frame on
-//! centred frames, computes the cumulative-mean-normalised difference through an
-//! FFT autocorrelation, refines troughs by parabolic interpolation, falls back to
-//! the global minimum in YIN, and decodes pYIN with a probabilistic HMM. The
-//! frequency range of YIN and pYIN is required, so [`YinConfig`] and
-//! [`PyinConfig`] have no `Default` and take `fmin` and `fmax` in `new`.
-//!
-//! ## How
-//!
-//! Bring [`AudioPitchTracking`] into scope and call [`yin`](AudioPitchTracking::yin)
-//! or [`pyin`](AudioPitchTracking::pyin) on any [`AudioSamples`]. Outputs are
-//! arrays shaped `(channels, n_frames)`; frame `t` is centred on sample
-//! `t * hop_length` when `center` is `true`. The harmonic helpers are free
-//! functions on `(channels, n_bins, n_frames)` magnitude spectrograms, such as
-//! the output of
-//! [`AudioSpectrum::spectrogram_matrix`](crate::operations::spectrum::AudioSpectrum::spectrogram_matrix).
-//!
-//! The output precision follows the input: f0 tracks and voicing
-//! probabilities have the sample type's
-//! [`AudioSample::Float`](crate::AudioSample::Float) (`f32` for `u8`, `i16`,
-//! `I24` and `f32` audio; `f64` for `i32` and `f64` audio), and the whole
-//! computation, including the pYIN observation and transition matrices and
-//! the Viterbi decoding, runs in that type. The free functions are generic
-//! over the element type ([`AudioFloat`]). Config parameters stay `f64`;
-//! tables derived from them (threshold grid, Beta prior masses, pitch-bin
-//! frequencies, transition matrix) are computed in `f64` and rounded once.
+//! Frame-wise pitch tracking with YIN and pYIN, and harmonic helpers for
+//! spectrograms (salience, harmonic interpolation): the [`AudioPitchTracking`]
+//! trait and its free functions. It returns one estimate per centred frame and
+//! channel; [`AudioPitchAnalysis`](crate::AudioPitchAnalysis) estimates one pitch
+//! per buffer instead (see
+//! [Choosing between overlapping APIs](crate::operations#choosing-between-overlapping-apis)).
 //!
 //! ```rust
-//! use audio_samples::operations::pitch_tracking::{AudioPitchTracking, PyinConfig, YinConfig};
-//! use audio_samples::{sample_rate, sine_wave};
+//! use audio_samples::{AudioPitchTracking, PyinConfig, YinConfig, sample_rate, sine_wave};
 //! use std::time::Duration;
 //!
 //! let audio = sine_wave::<f32>(220.0, Duration::from_millis(500), sample_rate!(22050), 0.5);
 //!
-//! // YIN over 65.4 Hz to 2093 Hz: one estimate per frame.
-//! // f32 audio gives an f32 track.
+//! // YIN over 65.4 Hz to 2093 Hz: one estimate per frame, as f32 for f32 audio.
 //! let f0: ndarray::Array2<f32> = audio.yin(&YinConfig::new(65.4, 2093.0)).unwrap();
 //! assert_eq!(f0.dim(), (1, 22));
 //! assert!((f0[[0, 11]] - 220.0).abs() < 1.0);
@@ -64,7 +22,37 @@
 //! assert!((r.f0[[0, 11]] - 220.0).abs() < 2.0);
 //! ```
 //!
-//! # References
+//! | Item | Computes |
+//! |---|---|
+//! | [`AudioPitchTracking::yin`] ([`yin`]) | YIN f0 per frame |
+//! | [`AudioPitchTracking::pyin`] ([`pyin`]) | pYIN f0, voiced flags and voicing probabilities |
+//! | [`salience`] | Harmonic salience of a spectrogram |
+//! | [`interp_harmonics`] | A spectrogram interpolated at harmonics of each bin |
+//! | [`f0_harmonics`] | A spectrogram interpolated at harmonics of an f0 track |
+//!
+//! ## How it works
+//!
+//! Each frame's cumulative-mean-normalised difference is computed through an FFT
+//! autocorrelation, and its troughs are refined by parabolic interpolation. YIN
+//! falls back to the global minimum when no trough is below the threshold; pYIN
+//! scores many thresholds and decodes the voiced pitch path with a probabilistic
+//! hidden Markov model.
+//!
+//! ## Conventions
+//!
+//! - Pitch tracks are arrays shaped `(channels, frames)`; with `center = true`,
+//!   frame `t` is centred on sample `t × hop_length`. The harmonic helpers take
+//!   `(channels, bins, frames)` magnitude spectrograms, such as the output of
+//!   [`AudioSpectrum::spectrogram_matrix`](crate::operations::spectrum::AudioSpectrum::spectrogram_matrix).
+//! - Precision follows the crate's [rule](crate#precision), including the pYIN
+//!   observation and transition matrices and the Viterbi decoding. Tables derived
+//!   from config parameters (threshold grid, Beta prior masses, pitch-bin
+//!   frequencies, transition matrix) are computed in `f64` and rounded once. The
+//!   free functions are generic over the element type ([`AudioFloat`]).
+//! - The frequency range is required, so [`YinConfig`] and [`PyinConfig`] have no
+//!   `Default` and take `fmin` and `fmax` in `new`.
+//!
+//! ## References
 //!
 //! - A. de Cheveigné and H. Kawahara, "YIN, a fundamental frequency estimator for
 //!   speech and music", J. Acoust. Soc. Am. 111(4), 2002.
@@ -104,7 +92,7 @@ fn param_err(parameter: &str, reason: impl ToString) -> AudioSampleError {
 /// required, so there is no `Default`: [`YinConfig::new`] takes `fmin` and
 /// `fmax` and sets the other fields to their defaults (`frame_length = 2048`,
 /// `hop_length = frame_length / 4`, `trough_threshold = 0.1`, centred frames,
-/// zero padding). [`YinConfig::librosa`] is currently the same as `new`. C2 to
+/// zero padding). [`YinConfig::librosa`] is the same as `new`. C2 to
 /// C7 (about 65.4 Hz to 2093 Hz) is a range for general use.
 ///
 /// ## Invariants
@@ -174,7 +162,7 @@ impl YinConfig {
         }
     }
 
-    /// Settings matching librosa 1.0's defaults for the given range; currently the
+    /// Settings matching librosa 1.0's defaults for the given range; the
     /// same as [`YinConfig::new`].
     #[must_use]
     pub fn librosa(fmin: f64, fmax: f64) -> Self {
@@ -292,7 +280,7 @@ pub enum UnvoicedFill {
 /// prior, Boltzmann parameter 2, 0.1 semitone resolution, 35.92 octaves/s
 /// maximum transition rate, switch and no-trough probabilities 0.01, NaN for
 /// unvoiced frames, centred frames with zero padding, `transition_min_prob =
-/// 1e-4`). [`PyinConfig::librosa`] is currently the same as `new`.
+/// 1e-4`). [`PyinConfig::librosa`] is the same as `new`.
 /// ## Invariants
 ///
 /// Checked by [`PyinConfig::validate`]: the YIN invariants of [`YinConfig`];
@@ -378,7 +366,7 @@ impl PyinConfig {
         }
     }
 
-    /// Settings matching librosa 1.0's defaults for the given range; currently the
+    /// Settings matching librosa 1.0's defaults for the given range; the
     /// same as [`PyinConfig::new`].
     #[must_use]
     pub fn librosa(fmin: f64, fmax: f64) -> Self {
@@ -1811,7 +1799,7 @@ pub enum SalienceAggregate {
 ///
 /// The defaults are uniform weights, weighted average, output only at peaks
 /// (local maxima along frequency) and NaN elsewhere. [`SalienceConfig::librosa`]
-/// is currently the same. Weights and the fill value
+/// is the same. Weights and the fill value
 /// are `f64` and are rounded to the element type of the spectrogram.
 ///
 /// ## Invariants
@@ -1863,7 +1851,7 @@ impl SalienceConfig {
         Self::default()
     }
 
-    /// Settings matching librosa 1.0's defaults; currently the same as [`Default`].
+    /// Settings matching librosa 1.0's defaults; the same as [`Default`].
     #[must_use]
     pub fn librosa() -> Self {
         Self::default()

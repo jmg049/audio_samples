@@ -1,36 +1,7 @@
-//! [`OpusCodec`], [`OpusEncodedAudio`], and the [`AudioCodec`] implementation.
-//!
-//! ## What
-//!
-//! `OpusCodec` segments a mono audio signal into fixed-length frames and encodes
-//! each frame independently using either SILK (speech) or CELT (music/generic),
-//! producing an [`OpusEncodedAudio`] value that carries all information needed
-//! for reconstruction.
-//!
-//! ## How
-//!
-//! ```rust,ignore
-//! use audio_samples::codecs::{encode, decode};
-//! use audio_samples::codecs::opus::{OpusCodec, OpusConfig, OpusMode};
-//! use spectrograms::WindowType;
-//!
-//! // Encode with CELT (music mode), 20 ms frames, 128 kbps budget.
-//! let config  = OpusConfig::with_mode(OpusMode::Celt, 128_000);
-//! let codec   = OpusCodec::new(config, WindowType::Hanning);
-//! let encoded = encode(&audio, codec)?;
-//!
-//! // Decode back to f32.
-//! let recovered = decode::<OpusCodec, f32>(encoded)?;
-//! ```
-//!
-//! ## Notes
-//!
-//! - This is an Opus-inspired teaching codec, not bitstream compatible with Opus.
-//! - No range coding or bitstream packing - that belongs in `audio_samples_io`.
-//! - Frames are `frame_size_ms` long (default 20 ms) and the CELT MDCT window
-//!   equals the frame length. Real Opus is not fixed at 20 ms: CELT supports
-//!   2.5, 5, 10 and 20 ms frames (120-960 samples at 48 kHz) with short-block
-//!   MDCTs for transients, and SILK 10, 20, 40 and 60 ms (RFC 6716, Section 2.1.4).
+//! [`OpusCodec`], [`OpusEncodedAudio`] and their [`AudioCodec`] implementation:
+//! mono audio cut into frames of `frame_size_ms` (20 ms by default), each coded
+//! with SILK, CELT or hybrid mode and decoded in order with the SILK filter state
+//! carried from frame to frame. The [module page](super) has an example.
 
 use std::num::{NonZeroU32, NonZeroUsize};
 
@@ -132,12 +103,14 @@ pub struct OpusEncodedAudio {
 ///
 /// ## What belongs in the IO crate
 ///
-/// Bitstream packing, range coding, Ogg encapsulation, and the `.opus` container
-/// format are responsibilities of `audio_samples_io`, not this crate.
+/// Encoded audio is an in-memory structure: there is no bitstream packing, range
+/// coding or container format.
 ///
 /// ## Example
 ///
-/// ```rust,ignore
+/// ```rust
+/// # use audio_samples::{sample_rate, sine_wave};
+/// # let audio = sine_wave::<f32>(440.0, std::time::Duration::from_millis(100), sample_rate!(48000), 0.5);
 /// use audio_samples::codecs::{encode, decode};
 /// use audio_samples::codecs::opus::{OpusCodec, OpusConfig, OpusMode};
 /// use spectrograms::WindowType;
@@ -147,6 +120,8 @@ pub struct OpusEncodedAudio {
 ///
 /// let encoded   = encode(&audio, codec)?;
 /// let recovered = decode::<OpusCodec, f32>(encoded)?;
+/// assert_eq!(recovered.samples_per_channel(), audio.samples_per_channel());
+/// # Ok::<(), audio_samples::AudioSampleError>(())
 /// ```
 #[derive(Debug, Clone)]
 pub struct OpusCodec {

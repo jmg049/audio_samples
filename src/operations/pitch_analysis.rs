@@ -1,116 +1,47 @@
-//! Pitch detection and fundamental frequency analysis.
-//!
-//! # What
-//!
-//! Estimators of the fundamental frequency f₀ (in Hz) of a mono signal - a
-//! single estimate for the whole signal ([`AudioPitchAnalysis::detect_pitch_yin`],
+//! Pitch of a mono buffer: one fundamental-frequency estimate for the whole signal
+//! ([`AudioPitchAnalysis::detect_pitch_yin`],
 //! [`AudioPitchAnalysis::detect_pitch_autocorr`]) or a frame-by-frame contour
-//! ([`AudioPitchAnalysis::track_pitch`]) - plus a spectral harmonic-to-noise
-//! ratio, harmonic magnitudes and Krumhansl-Schmuckler key estimation.
+//! ([`AudioPitchAnalysis::track_pitch`]), plus a harmonic-to-noise ratio, harmonic
+//! magnitudes and key estimation. For frame-wise YIN and pYIN on centred frames,
+//! with any number of channels and voicing probabilities, use
+//! [`operations::pitch_tracking`](crate::operations::pitch_tracking); see
+//! [Choosing between overlapping APIs](crate::operations#choosing-between-overlapping-apis).
 //!
-//! # Why
-//!
-//! A periodic signal with period T₀ seconds repeats every τ₀ = T₀·f_s samples,
-//! and f₀ = 1/T₀ = f_s/τ₀. Both time-domain detectors below search for τ₀
-//! by comparing the signal with a copy of itself delayed by a lag τ (in
-//! samples). Autocorrelation is the simplest such comparison; YIN is a
-//! normalised difference that is far less prone to octave errors and to bias
-//! from the shrinking overlap at long lags.
-//!
-//! # How
-//!
-//! Notation: x\[n\] are the samples (`n = 0..N−1`), f_s is the sample rate in
-//! Hz, τ is a lag in samples.
-//!
-//! **Search range.** A frequency range `[f_min, f_max]` (Hz) becomes the lag
-//! range `τ_min = ⌊f_s/f_max⌋ ... τ_max = ⌊f_s/f_min⌋` (samples). Every
-//! detector requires `τ_max < ⌊N/2⌋`, i.e. the analysed signal or frame must be
-//! longer than **two periods of the lowest frequency** searched
-//! (N ≥ 2(⌊f_s/f_min⌋ + 1)); otherwise the result is `None`. Example:
-//! f_min = 80 Hz at f_s = 16 kHz needs N ≥ 402 samples (about 25 ms).
-//!
-//! **Autocorrelation** ([`autocorr_pitch_detection`]): the raw (unnormalised,
-//! no mean removal) sum
-//!
-//! ```text
-//! r(τ) = Σ_{n=0}^{N−1−τ} x[n]·x[n+τ]
-//! ```
-//!
-//! is evaluated for τ ∈ [τ_min, τ_max] and τ̂ = argmax r(τ); f₀ = f_s/τ̂.
-//! τ̂ is an integer, so the frequency grid near f₀ has spacing
-//! ≈ f₀²/f_s (12 Hz at 440 Hz and 16 kHz). Because the overlap shrinks with τ,
-//! r(τ) is biased towards short lags.
-//!
-//! **YIN** ([`yin_pitch_detection`]; de Cheveigné & Kawahara, "YIN, a fundamental
-//! frequency estimator for speech and music", JASA 111(4):1917-1930, 2002,
-//! steps 2-5 with the departures noted below):
-//!
-//! 1. Difference function over every overlapping pair of samples:
-//!
-//!    ```text
-//!    d(τ) = Σ_{j=0}^{N−1−τ} (x[j] − x[j+τ])²,   τ = 1 … τ_max
-//!    ```
-//!
-//! 2. Cumulative mean normalised difference (dimensionless):
-//!
-//!    ```text
-//!    d′(0) = 1,   d′(τ) = d(τ) / ( (1/τ) · Σ_{j=1}^{τ} d(j) )
-//!    ```
-//!
-//!    The running mean always starts at τ = 1, even when τ_min > 1.
-//! 3. Absolute threshold: take the smallest τ ∈ [τ_min, τ_max] with
-//!    d′(τ) < `threshold` (typically 0.1-0.2), then move to the bottom of that
-//!    dip (keep increasing τ while d′(τ+1) < d′(τ)). If no lag dips below the
-//!    threshold the frame is reported as unvoiced (`None`).
-//! 4. Parabolic interpolation through (τ−1, τ, τ+1):
-//!
-//!    ```text
-//!    τ̂ = τ + ½·(d′(τ−1) − d′(τ+1)) / (d′(τ−1) − 2·d′(τ) + d′(τ+1))
-//!    ```
-//!
-//!    giving a fractional period; f₀ = f_s/τ̂ Hz. There is no shift when τ is at either
-//!    end of [τ_min, τ_max] or when the vertex lies more than one lag away from τ.
-//!
-//! Departures from the paper: (a) the paper's step 5 interpolates the **raw**
-//! difference function d(τ) around the selected lag (interpolating d′ is slightly
-//! biased), whereas this code fits the parabola to d′; (b) the paper's step 6 ("best
-//! local estimate") is not implemented, and when no lag dips below the threshold the
-//! paper takes the global minimum of d′ rather than declaring the frame unvoiced; (c)
-//! the paper sums d(τ) over a fixed integration window W starting at the beginning of
-//! the frame, whereas this code sums over all N − τ overlapping pairs. A fixed window
-//! measures the pitch of the frame's early part, which biases the estimate when the
-//! pitch moves within the frame (about 9 cents on a 1.5 octave/s glide with 2048-sample
-//! frames at 22.05 kHz); the full overlap keeps the analysed span centred on the frame.
-//!
-//! [`AudioPitchAnalysis::detect_pitch_yin`] analyses the whole signal as one frame (all
-//! N − τ overlapping pairs) and returns `None` for unvoiced input. Use
-//! [`AudioPitchAnalysis::track_pitch`] for a framewise contour.
-//!
-//! The harmonic analysis, HNR and key estimation methods use the
-//! `spectrograms` crate for their FFTs. All methods operate on mono signals
-//! only.
-//!
-//! For frame-wise YIN / pYIN with centred frames, multichannel input and voicing
-//! probabilities, see [`crate::operations::pitch_tracking`].
-//!
-//! # Example
-//!
-//! ```
-//! use audio_samples::operations::traits::AudioPitchAnalysis;
-//! use audio_samples::{sample_rate, sine_wave};
+//! ```rust
+//! use audio_samples::{AudioPitchAnalysis, sample_rate, sine_wave};
 //! use std::time::Duration;
 //!
-//! // Generate a 440 Hz sine wave at 44100 Hz for 0.1 s.
 //! let hz = 440.0f64;
 //! let audio = sine_wave::<f64>(hz, Duration::from_millis(100), sample_rate!(44100), 1.0);
 //!
-//! // Search 80-1000 Hz: lags 44..=551 samples, so N = 4410 > 2·551.
-//! let pitch = audio.detect_pitch_yin(0.1, 80.0, 1000.0).unwrap();
-//! assert!(pitch.is_some());
-//! let detected_hz = pitch.unwrap();
+//! // Search 80-1000 Hz: lags 44..=551 samples, so N = 4410 > 2 · 551.
+//! let pitch = audio.detect_pitch_yin(0.1, 80.0, 1000.0).unwrap().unwrap();
 //! // Parabolic interpolation gives sub-sample periods: well within 1 Hz here.
-//! assert!((detected_hz - hz).abs() < 1.0, "detected {detected_hz:.2} Hz, expected {hz} Hz");
+//! assert!((pitch - hz).abs() < 1.0, "detected {pitch:.2} Hz, expected {hz} Hz");
 //! ```
+//!
+//! ## Concepts
+//!
+//! A periodic signal with period T₀ seconds repeats every τ₀ = T₀·f_s samples,
+//! and f₀ = f_s/τ₀. Both time-domain detectors search for τ₀ by comparing the
+//! signal with a copy of itself delayed by a lag τ. Autocorrelation
+//! ([`autocorr_pitch_detection`]) is the simplest comparison; YIN
+//! ([`yin_pitch_detection`], which documents the algorithm) is a normalised
+//! difference that is far less prone to octave errors and to the bias from the
+//! shrinking overlap at long lags.
+//!
+//! ## Conventions
+//!
+//! - **Search range.** A range `[f_min, f_max]` in Hz becomes the lag range
+//!   `τ_min = ⌊f_s/f_max⌋ … τ_max = ⌊f_s/f_min⌋` samples. Every detector needs
+//!   `τ_max < ⌊N/2⌋`: the signal or frame must be longer than two periods of the
+//!   lowest frequency searched (N ≥ 2(⌊f_s/f_min⌋ + 1)); otherwise the result is
+//!   `None`. For example, f_min = 80 Hz at f_s = 16 kHz needs N ≥ 402 samples
+//!   (about 25 ms).
+//! - [`AudioPitchAnalysis::detect_pitch_yin`] analyses the whole signal as one
+//!   frame and returns `None` for unvoiced input.
+//! - Every method needs mono input. The harmonic analysis, HNR and key estimation
+//!   use the `spectrograms` crate for their FFTs.
 
 use std::num::NonZeroUsize;
 
@@ -1145,26 +1076,55 @@ fn calculate_correlation(chroma: &[f64], profile: &[f64], tonic: usize) -> f64 {
 
 /// Low-level YIN pitch detection that returns the fundamental period in samples.
 ///
-/// Computes the difference function `d(τ) = Σ_{j < n-τ} (x_j - x_{j+τ})²` for
-/// every lag `τ` in `1..=max_tau` and its cumulative mean normalised form
-/// `d'(τ) = d(τ) / ((1/τ) Σ_{k=1..τ} d(k))` (CMND). The cumulative mean always
-/// runs over all lags from 1, independent of `min_tau`; `[min_tau, max_tau]`
-/// only restricts the search. The first lag in that range whose CMND falls
-/// below `threshold` is followed down to the bottom of its dip (the local
-/// minimum), and the period is refined by parabolic interpolation over the
-/// neighbouring lags, so the result is fractional. The caller converts the
-/// period to Hz with `sample_rate / τ`.
-///
-/// This is the low-level primitive used by
-/// [`AudioPitchAnalysis::detect_pitch_yin`] and by
+/// The period is fractional (refined by parabolic interpolation); convert it to
+/// Hz with `sample_rate / τ`. This is the primitive behind
+/// [`AudioPitchAnalysis::detect_pitch_yin`] and
 /// [`AudioPitchAnalysis::track_pitch`] with [`PitchDetectionMethod::Yin`].
 ///
-/// Reference: A. de Cheveigné and H. Kawahara, "YIN, a fundamental frequency
-/// estimator for speech and music", JASA 111(4), 2002 (steps 2 to 5).
+/// # Algorithm
 ///
-/// The difference function sums the `n - τ` overlapping products of the whole
-/// slice (the paper's eq. 6). When no lag falls below `threshold` this returns
-/// `None`.
+/// Steps 2 to 5 of A. de Cheveigné and H. Kawahara, "YIN, a fundamental
+/// frequency estimator for speech and music", JASA 111(4):1917-1930, 2002, with
+/// the departures listed below. x\[j\] are the samples (`n` of them) and τ is a
+/// lag in samples.
+///
+/// 1. Difference function over every overlapping pair of samples:
+///
+///    ```text
+///    d(τ) = Σ_{j=0}^{n−1−τ} (x[j] − x[j+τ])²,   τ = 1 … max_tau
+///    ```
+///
+/// 2. Cumulative mean normalised difference (CMND, dimensionless):
+///
+///    ```text
+///    d′(0) = 1,   d′(τ) = d(τ) / ( (1/τ) · Σ_{j=1}^{τ} d(j) )
+///    ```
+///
+///    The running mean always starts at τ = 1; `[min_tau, max_tau]` only
+///    restricts the search.
+/// 3. Absolute threshold: take the smallest τ in `[min_tau, max_tau]` with
+///    d′(τ) < `threshold`, then move to the bottom of that dip (keep increasing τ
+///    while d′(τ+1) < d′(τ)). If no lag dips below the threshold, return `None`.
+/// 4. Parabolic interpolation through (τ−1, τ, τ+1):
+///
+///    ```text
+///    τ̂ = τ + ½·(d′(τ−1) − d′(τ+1)) / (d′(τ−1) − 2·d′(τ) + d′(τ+1))
+///    ```
+///
+///    There is no shift when τ is at either end of `[min_tau, max_tau]` or when
+///    the vertex lies more than one lag away from τ.
+///
+/// Departures from the paper: (a) the paper's step 5 interpolates the raw
+/// difference function d(τ) around the selected lag (interpolating d′ is
+/// slightly biased), whereas this code fits the parabola to d′; (b) the paper's
+/// step 6 ("best local estimate") is not implemented, and when no lag dips below
+/// the threshold the paper takes the global minimum of d′ rather than declaring
+/// the frame unvoiced; (c) the paper sums d(τ) over a fixed integration window
+/// starting at the beginning of the frame, whereas this code sums over all
+/// n − τ overlapping pairs. A fixed window measures the pitch of the frame's
+/// early part, which biases the estimate when the pitch moves within the frame
+/// (about 9 cents on a 1.5 octave/s glide with 2048-sample frames at
+/// 22.05 kHz); the full overlap keeps the analysed span centred on the frame.
 ///
 /// # Arguments
 ///
@@ -1280,7 +1240,9 @@ pub fn yin_pitch_detection(
 /// mean removal, no interpolation) and returns it as the estimated period.
 /// The caller converts to frequency with `sample_rate / tau`. Unlike YIN, the
 /// correlation is not normalised, making it fast but more susceptible to noise
-/// and biased towards short lags.
+/// and biased towards short lags, because the overlap shrinks as τ grows. The
+/// lag is an integer, so near f₀ the frequency grid has a spacing of about
+/// f₀²/f_s (12 Hz at 440 Hz and 16 kHz).
 ///
 /// This is the low-level primitive used by
 /// [`AudioPitchAnalysis::detect_pitch_autocorr`].

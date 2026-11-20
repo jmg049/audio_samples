@@ -1,619 +1,683 @@
-//! # AudioSamples
+//! Audio as a typed value. An [`AudioSamples<T>`] holds the samples together with
+//! their sample rate and channel count, and the stored format `T` is part of its
+//! type. Filters, spectrograms, pitch and beat trackers, effects and the resampler
+//! read the rate and the channel layout from the value, so they take no sample-rate
+//! argument and cannot be handed a stale one.
 //!
-//! A typed audio processing library for Rust that represents audio as a typed
-//! object that keeps its sample rate, channel layout and other invariants, rather
-//! than as an unstructured numeric buffer.
+//! The crate is for offline analysis, feature extraction, processing chains and
+//! teaching. It does no file I/O: [`audio_samples_io`](https://docs.rs/audio_samples_io)
+//! reads and writes WAV, FLAC and AIFF as `AudioSamples`.
 //!
-//! `audio_samples` provides a single central type, [`AudioSamples<T>`], that pairs raw
-//! PCM data (backed by [`ndarray`](https://docs.rs/ndarray)) with essential metadata:
-//! sample rate, channel count, and memory layout. Every audio processing operation in the
-//! library is defined as a trait method on this type, ensuring that metadata travels with
-//! the data throughout a processing pipeline.
+//! ```rust
+//! # #[cfg(all(feature = "processing", feature = "transforms", feature = "resampling"))] {
+//! use audio_samples::operations::types::ResamplingQuality;
+//! use audio_samples::{
+//!     AudioIirFiltering, AudioProcessing, AudioSamples, AudioSpectrum, AudioTypeConversion,
+//!     MelSpectrogramConfig, NormalizationConfig, nzu, sample_rate, sine_wave,
+//! };
+//! use ndarray::Array3;
+//! use std::time::Duration;
 //!
-//! Low-level audio APIs in Rust typically expose bare slices or `Vec<f32>` buffers,
-//! leaving metadata management to the caller. This encourages subtle bugs such as
-//! mismatched sample rates after resampling, or interleaved/non-interleaved confusion
-//! when passing buffers between components. `audio_samples` eliminates these error
-//! classes by encoding invariants directly into the type.
+//! // One second of 440 Hz at 44.1 kHz. The sample rate is part of the value.
+//! let tone: AudioSamples<'static, f32> =
+//!     sine_wave(440.0, Duration::from_secs(1), sample_rate!(44_100), 0.5);
 //!
-//! Start by creating an [`AudioSamples<T>`] from an ndarray or from one of the
-//! built-in signal generators (see [`utils::generation`]), then chain trait methods
-//! for any further processing. Feature flags keep the dependency footprint small -
-//! only enable what your application needs.
+//! // Operations are trait methods. The cutoff is in Hz: the filter reads the rate
+//! // from `tone`. The resampled audio carries its new rate to the next stage.
+//! let processed = tone
+//!     .butterworth_lowpass(nzu!(4), 1_000.0)?
+//!     .normalize(NormalizationConfig::peak(0.9))?
+//!     .resample(sample_rate!(16_000), ResamplingQuality::High)?;
+//! assert_eq!(processed.sample_rate().get(), 16_000);
+//! assert_eq!(processed.samples_per_channel().get(), 16_000);
 //!
-//! ## Operation Conventions
+//! // Analysis takes no sample-rate argument. The shape is (channels, mel bands, frames).
+//! let mel: Array3<f32> = processed.melspectrogram(&MelSpectrogramConfig::default())?;
+//! assert_eq!(mel.dim(), (1, 128, 32));
 //!
-//! Every transforming operation comes in two variants. The canonical, unsuffixed
-//! name borrows (`op(&self, ..) -> AudioSampleResult<Self>`) and returns a new,
-//! owned, modified copy, leaving the receiver untouched; the `op_in_place`
-//! counterpart (`op_in_place(&mut self, ..) -> AudioSampleResult<()>`) mutates the
-//! receiver in place. Because the borrowing variants return owned values, they
-//! compose into pipelines without consuming a binding you still need. A handful of
-//! operations that cannot fail (such as `scale`) return `Self` directly rather than
-//! a `Result`.
+//! // Store as 16-bit PCM. Analysis of 16-bit audio still computes in f32.
+//! let pcm: AudioSamples<'static, i16> = processed.to_format();
+//! let mel_pcm: Array3<f32> = pcm.melspectrogram(&MelSpectrogramConfig::default())?;
+//! assert_eq!(mel_pcm.dim(), mel.dim());
+//! # }
+//! # Ok::<(), audio_samples::AudioSampleError>(())
+//! ```
 //!
-//! [`AudioSamples<T>`] keeps its fields private; reach the underlying buffer and
-//! metadata through accessors - [`data()`](AudioSamples::data),
-//! [`data_mut()`](AudioSamples::data_mut),
-//! [`into_data()`](AudioSamples::into_data),
-//! [`into_data_borrowed()`](AudioSamples::into_data_borrowed), and
-//! [`sample_rate()`](AudioSamples::sample_rate). Channel **indices** are plain
-//! `usize`; channel **counts** use the dedicated `ChannelCount` type. Multi-channel
-//! analysis operations (spectral centroid, rolloff, and the rest of the spectral
-//! suite) take a [`ChannelReduction`] policy that selects how channels are folded
-//! down to a single value (`Error`, `First`, `Average`, or `Channel(i)`). Several
-//! analysis operations return structured results rather than bare tuples - for
+//! The example needs the `processing`, `transforms` and `resampling` features:
+//! `cargo add audio_samples --features processing,transforms,resampling`, or
+//! `--features full` for everything (see [Feature flags](#feature-flags)).
+//!
+//! ## Key concepts
+//!
+//! ### The audio value
+//!
+//! - **The sample rate and channel count are never zero.** Both are `NonZeroU32`,
+//!   and signatures show that type. [`sample_rate!`]`(44_100)` and
+//!   [`channels!`]`(2)` check their argument at compile time, so `sample_rate!(0)`
+//!   does not compile; `NonZeroU32::new` covers values known only at run time.
+//! - **Audio is never empty.** Every value has at least one channel and one sample.
+//!   Constructors given empty data return an error, and lengths are `NonZeroUsize`
+//!   (call `.get()` for a `usize`).
+//! - **Storage is planar.** Multi-channel audio is a `(channels, samples)` array with
+//!   each channel contiguous. Interleaved data is converted at the edges, by
+//!   [`AudioSamples::from_interleaved_vec`], [`AudioSamples::to_interleaved_vec`] and
+//!   `audio_samples_io`.
+//! - **The type is the format.** `T` is `u8`, `i16`, [`I24`], `i32`, `f32` or `f64`.
+//!   [`to_format::<U>()`](AudioTypeConversion::to_format) converts between formats
+//!   and rescales, so full scale stays full scale;
+//!   [`cast_as::<U>()`](AudioTypeConversion::cast_as) keeps the numeric values.
+//! - **Borrowed or owned.** `AudioSamples<'a, T>` can borrow an existing buffer
+//!   without copying it ([`AudioSamples::new_mono_from_slice`]). Operations that
+//!   build new audio return an owned `AudioSamples<'static, T>`.
+//!
+//! ### Precision
+//!
+//! | Sample type | Full scale | Silence | Analysis float ([`AudioSample::Float`]) |
+//! |---|---|---|---|
+//! | `u8` | 0 to 255 | 128 | `f32` |
+//! | `i16` | −2¹⁵ to 2¹⁵ − 1 | 0 | `f32` |
+//! | [`I24`] | −2²³ to 2²³ − 1 | 0 | `f32` |
+//! | `i32` | −2³¹ to 2³¹ − 1 | 0 | `f64` |
+//! | `f32` | −1.0 to 1.0 | 0.0 | `f32` |
+//! | `f64` | −1.0 to 1.0 | 0.0 | `f64` |
+//!
+//! Frame-wise analysis (spectrograms, features, chroma, constant-Q transforms, onset
+//! envelopes, pitch tracks) converts the samples to the smallest float type that
+//! holds every value of `T` exactly, computes in that type and returns arrays of it.
+//! Analysing 16-bit audio therefore takes half the memory it would in `f64`, and
+//! `i32` audio loses no precision. Audio-to-audio operations return audio of the
+//! input type `T`, and scalar statistics return `f64`.
+//!
+//! Analysis works in units of full scale: a sample of `i16::MAX` enters it as about
+//! `1.0`. There are two exceptions, each documented where it applies.
 #![cfg_attr(
     feature = "transforms",
-    doc = r#" example `power_spectral_density` yields a [`Psd`],"#
+    doc = r#" [`AudioTransforms`] computes in `f64` for every sample type, and"#
 )]
 #![cfg_attr(
     not(feature = "transforms"),
-    doc = r#" example `power_spectral_density` yields a `Psd` (requires the `transforms` feature),"#
+    doc = r#" `AudioTransforms` computes in `f64` for every sample type, and"#
 )]
-#![cfg_attr(
-    feature = "pitch-analysis",
-    doc = r#" `track_pitch` a [`PitchContour`], and `estimate_key` a [`Key`]."#
-)]
-#![cfg_attr(
-    not(feature = "pitch-analysis"),
-    doc = r#" `track_pitch` a `PitchContour`, and `estimate_key` a `Key` (both require the `pitch-analysis` feature)."#
-)]
-//!
-//! ## Installation
-//!
-//! ```bash
-//! cargo add audio_samples
-//! ```
-//!
-//! ## Features
-//!
-//! The library uses a modular feature flag system. Only enable what you need.
-//!
-//! | Feature | Description |
-//! |---|---|
-//! | `statistics` | Peak, RMS, variance, zero-crossings, and other statistical measures |
-//! | `processing` | Normalise, scale, clip, DC offset removal, and other sample-level operations (implies `statistics`) |
-//! | `editing` | Time-domain editing: trim, pad, reverse, concatenate, fade (implies `statistics`, `random-generation`) |
-//! | `channels` | Channel operations: mono↔stereo conversion, channel extraction, interleave/deinterleave |
-//! | `transforms` | Spectrogram and frequency-domain transforms via the `spectrograms` crate; STFT/ISTFT, mel spectrogram and MFCC (`AudioSpectrum`); with `resampling`, CQT/VQT (`AudioConstantQ`) |
-//! | `iir-filtering` | IIR filter design and application (Butterworth, Chebyshev I/II, Elliptic/Cauer, Bessel; low/high/band-pass and band-stop), zero-phase `filtfilt`, and a design-once streaming `SosFilter` |
-//! | `parametric-eq` | Multi-band parametric equaliser (implies `iir-filtering`) |
-//! | `dynamic-range` | Compression, limiting, gating, and expansion with side-chain support, configured via `CompressorConfig`/`LimiterConfig`/`GateConfig`/`ExpanderConfig` |
-//! | `envelopes` | Amplitude, RMS, and analytical envelope followers (implies `dynamic-range`, `editing`, `random-generation`) |
-//! | `peak-picking` | Onset strength curve peak picking |
-//! | `onset-detection` | Onset detection (implies `transforms`, `peak-picking`, `processing`) |
-//! | `beat-tracking` | Beat tracking and tempo estimation (`estimate_tempo`); onset, tempo and beat analysis (`AudioRhythm`) |
-//! | `decomposition` | Audio source decomposition (implies `onset-detection`) |
-//! | `pitch-analysis` | YIN and autocorrelation pitch detection; frame-wise YIN and pYIN (`AudioPitchTracking`) (implies `transforms`, `sequence`) |
-//! | `feature-extraction` | Frame-wise spectral features (`AudioFeatures`) and chroma / tuning (`AudioTonal`) (implies `transforms`) |
-//! | `effects` | Time stretch, pitch shift, emphasis, dB trim/split, HPSS (`AudioEffects`) (implies `transforms`, `resampling`, `editing`, `sequence`) |
-//! | `sequence` | DTW, Viterbi, recurrence matrices and `sync` (`operations::sequence`) |
-//! | `vad` | Voice activity detection |
-//! | `psychoacoustic` | Psychoacoustic analysis: Bark/Mel band layouts, ATH, masking thresholds, SMR (implies `transforms`) |
-//! | `resampling` | Delay-free windowed-sinc sample-rate conversion (whole-buffer and streaming) |
-//! | `plotting` | Signal plotting via `plotly` |
-//! | `fixed-size-audio` | Stack-allocated fixed-size audio buffers |
-//! | `random-generation` | Noise generators and stochastic signal sources (implies `rand`) |
-//! | `full` | Enables all of the above |
-//!
-//! See `Cargo.toml` for the complete dependency graph.
-//!
-//! ### Modules by feature
-//!
-//! The default build (`bare-bones`) contains [`AudioSamples`], the conversions, the
-//! iterators, [`utils`], [`operations::traits`] and [`operations::types`]. Each feature
-//! below adds the modules listed next to it. A module name is a link when this
-//! documentation was built with its feature, and plain text otherwise. In a checkout
-//! of the repository, `cargo docs` builds and opens the documentation with every
-//! feature that builds offline (an alias defined in `.cargo/config.toml`).
-//!
-//! | Feature | Modules |
-//! |---|---|
 #![cfg_attr(
     feature = "statistics",
-    doc = r#" | `statistics` | [`operations::statistics`] |"#
+    doc = r#" the moments of [`AudioStatistics`] (mean, RMS, variance)"#
 )]
 #![cfg_attr(
     not(feature = "statistics"),
-    doc = r#" | `statistics` | `operations::statistics` |"#
-)]
-#![cfg_attr(
-    feature = "processing",
-    doc = r#" | `processing` | [`operations::processing`] |"#
-)]
-#![cfg_attr(
-    not(feature = "processing"),
-    doc = r#" | `processing` | `operations::processing` |"#
-)]
-#![cfg_attr(
-    feature = "transforms",
-    doc = r#" | `transforms` | [`operations::transforms`], [`operations::spectrum`], [`operations::filterbanks`] |"#
-)]
-#![cfg_attr(
-    not(feature = "transforms"),
-    doc = r#" | `transforms` | `operations::transforms`, `operations::spectrum`, `operations::filterbanks` |"#
-)]
-#![cfg_attr(
-    all(feature = "transforms", feature = "resampling"),
-    doc = r#" | `transforms` + `resampling` | [`operations::constant_q`] |"#
-)]
-#![cfg_attr(
-    not(all(feature = "transforms", feature = "resampling")),
-    doc = r#" | `transforms` + `resampling` | `operations::constant_q` |"#
-)]
-#![cfg_attr(
-    feature = "editing",
-    doc = r#" | `editing` | [`operations::editing`] |"#
-)]
-#![cfg_attr(
-    not(feature = "editing"),
-    doc = r#" | `editing` | `operations::editing` |"#
-)]
-#![cfg_attr(
-    feature = "channels",
-    doc = r#" | `channels` | [`operations::channels`] |"#
-)]
-#![cfg_attr(
-    not(feature = "channels"),
-    doc = r#" | `channels` | `operations::channels` |"#
-)]
-#![cfg_attr(
-    feature = "dynamic-range",
-    doc = r#" | `dynamic-range` | [`operations::dynamic_range`] |"#
-)]
-#![cfg_attr(
-    not(feature = "dynamic-range"),
-    doc = r#" | `dynamic-range` | `operations::dynamic_range` |"#
+    doc = r#" the moments of `AudioStatistics` (mean, RMS, variance)"#
 )]
 #![cfg_attr(
     feature = "envelopes",
-    doc = r#" | `envelopes` | [`operations::envelopes`] |"#
+    doc = r#" and the [`operations::envelopes`] use the raw stored values."#
 )]
 #![cfg_attr(
     not(feature = "envelopes"),
-    doc = r#" | `envelopes` | `operations::envelopes` |"#
+    doc = r#" and the `operations::envelopes` use the raw stored values."#
+)]
+//!
+//! ### Array layout
+//!
+//! Frame-wise results are `ndarray` arrays shaped `(channels, features, frames)`.
+//! Mono input gives one channel, and a per-frame scalar (a centroid, an RMS value)
+//! has one feature row. With centring on, the default, frame `t` is centred on
+//! sample `t × hop_length`, at `t × hop_length / sample_rate` seconds.
+//!
+//! ### Configuration
+//!
+//! An operation with more than a few parameters takes a config struct. Configs
+//! implement `Default` unless a parameter has no sensible default; then `new` takes
+//! it (the frequency range of a pitch tracker, for example). Configs that match a
+//! librosa function also have a `librosa()` constructor with librosa's defaults.
+//! Where `Default` differs from `librosa()`, the config's documentation says how.
+//!
+//! ## How the crate is organised
+//!
+//! ### Operations
+//!
+//! Most operations are methods of one trait per area, implemented for
+//! `AudioSamples` and, in most cases, re-exported at the crate root: bring the trait
+//! into scope and call the method. Transforming operations come in pairs. `op(&self, ..)` returns
+//! a new owned value and leaves the receiver unchanged, so calls chain;
+//! `op_in_place(&mut self, ..)` modifies the receiver. Free functions cover the
+//! rest, including the `*_from_*` variants that take a precomputed spectrogram or
+//! envelope, so that one STFT can feed several features.
+//!
+//! Fallible calls return [`AudioSampleResult`]. Every [`AudioSampleError`] carries a
+//! stable code and a help message through [`miette::Diagnostic`]. With the `fancy`
+//! feature, miette renders them in colour, with carets under the offending input.
+//!
+//! ### Where to find things
+//!
+//! | Task | Where |
+//! |---|---|
+//! | Read or write a file | [`audio_samples_io`](https://docs.rs/audio_samples_io) |
+//! | Generate test signals and example clips | [`sine_wave`], [`chirp`], [`example_clip`] and the rest of [`utils::generation`] |
+#![cfg_attr(
+    feature = "statistics",
+    doc = r#" | Peak, RMS, zero crossings, correlation | [`AudioStatistics`] |"#
+)]
+#![cfg_attr(
+    not(feature = "statistics"),
+    doc = r#" | Peak, RMS, zero crossings, correlation | `AudioStatistics` |"#
+)]
+#![cfg_attr(
+    feature = "processing",
+    doc = r#" | Gain, normalisation, clipping, DC removal, μ-law | [`AudioProcessing`] |"#
+)]
+#![cfg_attr(
+    not(feature = "processing"),
+    doc = r#" | Gain, normalisation, clipping, DC removal, μ-law | `AudioProcessing` |"#
+)]
+#![cfg_attr(
+    feature = "editing",
+    doc = r#" | Trim, pad, fade, mix, concatenate, split | [`AudioEditing`] |"#
+)]
+#![cfg_attr(
+    not(feature = "editing"),
+    doc = r#" | Trim, pad, fade, mix, concatenate, split | `AudioEditing` |"#
+)]
+#![cfg_attr(
+    feature = "channels",
+    doc = r#" | Mono and stereo conversion, panning, interleaving | [`AudioChannelOps`] |"#
+)]
+#![cfg_attr(
+    not(feature = "channels"),
+    doc = r#" | Mono and stereo conversion, panning, interleaving | `AudioChannelOps` |"#
 )]
 #![cfg_attr(
     feature = "iir-filtering",
-    doc = r#" | `iir-filtering` | [`operations::iir_filtering`] |"#
+    doc = r#" | Butterworth, Chebyshev, elliptic and Bessel filters | [`AudioIirFiltering`] |"#
 )]
 #![cfg_attr(
     not(feature = "iir-filtering"),
-    doc = r#" | `iir-filtering` | `operations::iir_filtering` |"#
+    doc = r#" | Butterworth, Chebyshev, elliptic and Bessel filters | `AudioIirFiltering` |"#
 )]
 #![cfg_attr(
     feature = "parametric-eq",
-    doc = r#" | `parametric-eq` | [`operations::parametric_eq`] |"#
+    doc = r#" | Parametric and three-band EQ | [`AudioParametricEq`] |"#
 )]
 #![cfg_attr(
     not(feature = "parametric-eq"),
-    doc = r#" | `parametric-eq` | `operations::parametric_eq` |"#
+    doc = r#" | Parametric and three-band EQ | `AudioParametricEq` |"#
 )]
 #![cfg_attr(
-    feature = "peak-picking",
-    doc = r#" | `peak-picking` | [`operations::peak_picking`] |"#
+    feature = "dynamic-range",
+    doc = r#" | Compressor, limiter, gate, expander | [`AudioDynamicRange`] |"#
 )]
 #![cfg_attr(
-    not(feature = "peak-picking"),
-    doc = r#" | `peak-picking` | `operations::peak_picking` |"#
+    not(feature = "dynamic-range"),
+    doc = r#" | Compressor, limiter, gate, expander | `AudioDynamicRange` |"#
 )]
 #![cfg_attr(
-    feature = "onset-detection",
-    doc = r#" | `onset-detection` | [`operations::onset`] |"#
+    feature = "envelopes",
+    doc = r#" | Amplitude, RMS and analytic envelopes | [`AudioEnvelopes`](operations::AudioEnvelopes) |"#
 )]
 #![cfg_attr(
-    not(feature = "onset-detection"),
-    doc = r#" | `onset-detection` | `operations::onset` |"#
+    not(feature = "envelopes"),
+    doc = r#" | Amplitude, RMS and analytic envelopes | `AudioEnvelopes` |"#
 )]
 #![cfg_attr(
-    feature = "beat-tracking",
-    doc = r#" | `beat-tracking` | [`operations::beat`], [`operations::rhythm`] |"#
+    feature = "resampling",
+    doc = r#" | Sample-rate conversion, whole-buffer or streamed | [`resample`], [`StreamingResampler`] |"#
 )]
 #![cfg_attr(
-    not(feature = "beat-tracking"),
-    doc = r#" | `beat-tracking` | `operations::beat`, `operations::rhythm` |"#
+    not(feature = "resampling"),
+    doc = r#" | Sample-rate conversion, whole-buffer or streamed | `resample`, `StreamingResampler` |"#
 )]
 #![cfg_attr(
-    feature = "decomposition",
-    doc = r#" | `decomposition` | [`operations::hpss`] |"#
+    feature = "transforms",
+    doc = r#" | STFT, mel spectrogram, MFCC, decibels | [`AudioSpectrum`] |"#
 )]
 #![cfg_attr(
-    not(feature = "decomposition"),
-    doc = r#" | `decomposition` | `operations::hpss` |"#
-)]
-#![cfg_attr(
-    feature = "pitch-analysis",
-    doc = r#" | `pitch-analysis` | [`operations::pitch_analysis`], [`operations::pitch_tracking`] |"#
-)]
-#![cfg_attr(
-    not(feature = "pitch-analysis"),
-    doc = r#" | `pitch-analysis` | `operations::pitch_analysis`, `operations::pitch_tracking` |"#
+    not(feature = "transforms"),
+    doc = r#" | STFT, mel spectrogram, MFCC, decibels | `AudioSpectrum` |"#
 )]
 #![cfg_attr(
     feature = "feature-extraction",
-    doc = r#" | `feature-extraction` | [`operations::features`], [`operations::tonal`] |"#
+    doc = r#" | Frame-wise spectral features, RMS, zero-crossing rate | [`AudioFeatures`] |"#
 )]
 #![cfg_attr(
     not(feature = "feature-extraction"),
-    doc = r#" | `feature-extraction` | `operations::features`, `operations::tonal` |"#
+    doc = r#" | Frame-wise spectral features, RMS, zero-crossing rate | `AudioFeatures` |"#
+)]
+#![cfg_attr(
+    feature = "feature-extraction",
+    doc = r#" | Chroma and tuning | [`AudioTonal`] |"#
+)]
+#![cfg_attr(
+    not(feature = "feature-extraction"),
+    doc = r#" | Chroma and tuning | `AudioTonal` |"#
+)]
+#![cfg_attr(
+    all(feature = "transforms", feature = "resampling"),
+    doc = r#" | Constant-Q and variable-Q transforms | [`AudioConstantQ`] |"#
+)]
+#![cfg_attr(
+    not(all(feature = "transforms", feature = "resampling")),
+    doc = r#" | Constant-Q and variable-Q transforms | `AudioConstantQ` |"#
+)]
+#![cfg_attr(
+    feature = "pitch-analysis",
+    doc = r#" | Pitch tracking (YIN, pYIN) | [`AudioPitchTracking`] |"#
+)]
+#![cfg_attr(
+    not(feature = "pitch-analysis"),
+    doc = r#" | Pitch tracking (YIN, pYIN) | `AudioPitchTracking` |"#
+)]
+#![cfg_attr(
+    feature = "pitch-analysis",
+    doc = r#" | Key estimation | [`AudioPitchAnalysis::estimate_key`] |"#
+)]
+#![cfg_attr(
+    not(feature = "pitch-analysis"),
+    doc = r#" | Key estimation | `AudioPitchAnalysis::estimate_key` |"#
+)]
+#![cfg_attr(
+    feature = "beat-tracking",
+    doc = r#" | Onsets, tempo and beats | [`AudioRhythm`] |"#
+)]
+#![cfg_attr(
+    not(feature = "beat-tracking"),
+    doc = r#" | Onsets, tempo and beats | `AudioRhythm` |"#
 )]
 #![cfg_attr(
     feature = "effects",
-    doc = r#" | `effects` | [`operations::effects`] |"#
+    doc = r#" | Time stretch, pitch shift, HPSS, silence trimming | [`AudioEffects`] |"#
 )]
 #![cfg_attr(
     not(feature = "effects"),
-    doc = r#" | `effects` | `operations::effects` |"#
+    doc = r#" | Time stretch, pitch shift, HPSS, silence trimming | `AudioEffects` |"#
+)]
+#![cfg_attr(
+    feature = "vad",
+    doc = r#" | Voice activity detection | [`AudioVoiceActivityDetection`] |"#
+)]
+#![cfg_attr(
+    not(feature = "vad"),
+    doc = r#" | Voice activity detection | `AudioVoiceActivityDetection` |"#
 )]
 #![cfg_attr(
     feature = "sequence",
-    doc = r#" | `sequence` | [`operations::sequence`] |"#
+    doc = r#" | DTW, Viterbi decoding, recurrence matrices | [`operations::sequence`] |"#
 )]
 #![cfg_attr(
     not(feature = "sequence"),
-    doc = r#" | `sequence` | `operations::sequence` |"#
-)]
-#![cfg_attr(feature = "linalg", doc = r#" | `linalg` | [`operations::linalg`] |"#)]
-#![cfg_attr(
-    not(feature = "linalg"),
-    doc = r#" | `linalg` | `operations::linalg` |"#
-)]
-#![cfg_attr(
-    feature = "feature-inversion",
-    doc = r#" | `feature-inversion` | [`operations::inverse`] |"#
-)]
-#![cfg_attr(
-    not(feature = "feature-inversion"),
-    doc = r#" | `feature-inversion` | `operations::inverse` |"#
-)]
-#![cfg_attr(
-    feature = "factorization",
-    doc = r#" | `factorization` | [`operations::factorization`] |"#
-)]
-#![cfg_attr(
-    not(feature = "factorization"),
-    doc = r#" | `factorization` | `operations::factorization` |"#
-)]
-#![cfg_attr(
-    feature = "pitch-filterbank",
-    doc = r#" | `pitch-filterbank` | [`operations::pitch_filterbank`] |"#
-)]
-#![cfg_attr(
-    not(feature = "pitch-filterbank"),
-    doc = r#" | `pitch-filterbank` | `operations::pitch_filterbank` |"#
-)]
-#![cfg_attr(feature = "mellin", doc = r#" | `mellin` | [`operations::mellin`] |"#)]
-#![cfg_attr(
-    not(feature = "mellin"),
-    doc = r#" | `mellin` | `operations::mellin` |"#
-)]
-#![cfg_attr(
-    feature = "segmentation",
-    doc = r#" | `segmentation` | [`operations::segment`] |"#
-)]
-#![cfg_attr(
-    not(feature = "segmentation"),
-    doc = r#" | `segmentation` | `operations::segment` |"#
-)]
-#![cfg_attr(feature = "vad", doc = r#" | `vad` | [`operations::vad`] |"#)]
-#![cfg_attr(not(feature = "vad"), doc = r#" | `vad` | `operations::vad` |"#)]
-#![cfg_attr(
-    feature = "plotting",
-    doc = r#" | `plotting` | [`operations::plotting`] |"#
-)]
-#![cfg_attr(
-    not(feature = "plotting"),
-    doc = r#" | `plotting` | `operations::plotting` |"#
-)]
-#![cfg_attr(feature = "resampling", doc = r#" | `resampling` | [`resampling`] |"#)]
-#![cfg_attr(
-    not(feature = "resampling"),
-    doc = r#" | `resampling` | `resampling` |"#
+    doc = r#" | DTW, Viterbi decoding, recurrence matrices | `operations::sequence` |"#
 )]
 #![cfg_attr(
     feature = "psychoacoustic",
-    doc = r#" | `psychoacoustic` | [`codecs`], [`codecs::perceptual`] |"#
+    doc = r#" | Masking thresholds and perceptual coding | [`codecs`] |"#
 )]
 #![cfg_attr(
     not(feature = "psychoacoustic"),
-    doc = r#" | `psychoacoustic` | `codecs`, `codecs::perceptual` |"#
+    doc = r#" | Masking thresholds and perceptual coding | `codecs` |"#
+)]
+#![cfg_attr(
+    feature = "plotting",
+    doc = r#" | Interactive plots | [`AudioPlotting`](operations::AudioPlotting) |"#
+)]
+#![cfg_attr(
+    not(feature = "plotting"),
+    doc = r#" | Interactive plots | `AudioPlotting` |"#
+)]
+//!
+#![cfg_attr(
+    feature = "transforms",
+    doc = r#" Some tasks have two APIs, such as [`AudioTransforms::mfcc`] and"#
+)]
+#![cfg_attr(
+    not(feature = "transforms"),
+    doc = r#" Some tasks have two APIs, such as `AudioTransforms::mfcc` and"#
+)]
+#![cfg_attr(
+    feature = "transforms",
+    doc = r#" [`AudioSpectrum::mfcc_frames`]. They follow different conventions; the table"#
+)]
+#![cfg_attr(
+    not(feature = "transforms"),
+    doc = r#" `AudioSpectrum::mfcc_frames`. They follow different conventions; the table"#
+)]
+//! [Choosing between overlapping APIs](operations#choosing-between-overlapping-apis)
+//! says which to use for what.
+//!
+//! ### Feature flags
+//!
+//! The default build (`bare-bones`) has no optional features. It contains
+//! [`AudioSamples`], the sample-format conversions, the iterators, [`utils`],
+//! [`operations::traits`] and [`operations::types`]. Each feature below adds the
+//! modules next to it and turns on the features in the last column. On docs.rs,
+//! every item names the feature it needs. A module name in the table is a link when
+//! this documentation was built with its feature, and plain text otherwise. In a
+//! checkout of the repository, `cargo docs` builds and opens the documentation with
+//! every feature that builds offline.
+//!
+//! | Feature | Adds | Also enables |
+//! |---|---|---|
+#![cfg_attr(
+    feature = "statistics",
+    doc = r#" | `statistics` | [`operations::statistics`] | |"#
+)]
+#![cfg_attr(
+    not(feature = "statistics"),
+    doc = r#" | `statistics` | `operations::statistics` | |"#
+)]
+#![cfg_attr(
+    feature = "processing",
+    doc = r#" | `processing` | [`operations::processing`] | `statistics`, `iir-filtering` |"#
+)]
+#![cfg_attr(
+    not(feature = "processing"),
+    doc = r#" | `processing` | `operations::processing` | `statistics`, `iir-filtering` |"#
+)]
+#![cfg_attr(
+    feature = "editing",
+    doc = r#" | `editing` | [`operations::editing`], window iterators | `statistics`, `random-generation` |"#
+)]
+#![cfg_attr(
+    not(feature = "editing"),
+    doc = r#" | `editing` | `operations::editing`, window iterators | `statistics`, `random-generation` |"#
+)]
+#![cfg_attr(
+    feature = "channels",
+    doc = r#" | `channels` | [`operations::channels`] | |"#
+)]
+#![cfg_attr(
+    not(feature = "channels"),
+    doc = r#" | `channels` | `operations::channels` | |"#
+)]
+#![cfg_attr(
+    feature = "iir-filtering",
+    doc = r#" | `iir-filtering` | [`operations::iir_filtering`] | |"#
+)]
+#![cfg_attr(
+    not(feature = "iir-filtering"),
+    doc = r#" | `iir-filtering` | `operations::iir_filtering` | |"#
+)]
+#![cfg_attr(
+    feature = "parametric-eq",
+    doc = r#" | `parametric-eq` | [`operations::parametric_eq`] | `iir-filtering`, `channels` |"#
+)]
+#![cfg_attr(
+    not(feature = "parametric-eq"),
+    doc = r#" | `parametric-eq` | `operations::parametric_eq` | `iir-filtering`, `channels` |"#
+)]
+#![cfg_attr(
+    feature = "dynamic-range",
+    doc = r#" | `dynamic-range` | [`operations::dynamic_range`] | |"#
+)]
+#![cfg_attr(
+    not(feature = "dynamic-range"),
+    doc = r#" | `dynamic-range` | `operations::dynamic_range` | |"#
+)]
+#![cfg_attr(
+    feature = "envelopes",
+    doc = r#" | `envelopes` | [`operations::envelopes`] | `dynamic-range`, `editing` |"#
+)]
+#![cfg_attr(
+    not(feature = "envelopes"),
+    doc = r#" | `envelopes` | `operations::envelopes` | `dynamic-range`, `editing` |"#
+)]
+#![cfg_attr(feature = "vad", doc = r#" | `vad` | [`operations::vad`] | |"#)]
+#![cfg_attr(not(feature = "vad"), doc = r#" | `vad` | `operations::vad` | |"#)]
+#![cfg_attr(
+    feature = "peak-picking",
+    doc = r#" | `peak-picking` | [`operations::peak_picking`] | |"#
+)]
+#![cfg_attr(
+    not(feature = "peak-picking"),
+    doc = r#" | `peak-picking` | `operations::peak_picking` | |"#
+)]
+#![cfg_attr(
+    feature = "resampling",
+    doc = r#" | `resampling` | [`resampling`] | |"#
+)]
+#![cfg_attr(
+    not(feature = "resampling"),
+    doc = r#" | `resampling` | `resampling` | |"#
+)]
+#![cfg_attr(
+    feature = "transforms",
+    doc = r#" | `transforms` | [`operations::transforms`], [`operations::spectrum`], [`operations::filterbanks`] | |"#
+)]
+#![cfg_attr(
+    not(feature = "transforms"),
+    doc = r#" | `transforms` | `operations::transforms`, `operations::spectrum`, `operations::filterbanks` | |"#
+)]
+#![cfg_attr(
+    all(feature = "transforms", feature = "resampling"),
+    doc = r#" | `transforms` + `resampling` | [`operations::constant_q`] | |"#
+)]
+#![cfg_attr(
+    not(all(feature = "transforms", feature = "resampling")),
+    doc = r#" | `transforms` + `resampling` | `operations::constant_q` | |"#
+)]
+#![cfg_attr(
+    feature = "feature-extraction",
+    doc = r#" | `feature-extraction` | [`operations::features`], [`operations::tonal`] | `transforms` |"#
+)]
+#![cfg_attr(
+    not(feature = "feature-extraction"),
+    doc = r#" | `feature-extraction` | `operations::features`, `operations::tonal` | `transforms` |"#
+)]
+#![cfg_attr(
+    feature = "onset-detection",
+    doc = r#" | `onset-detection` | [`operations::onset`] | `transforms`, `peak-picking`, `processing` |"#
+)]
+#![cfg_attr(
+    not(feature = "onset-detection"),
+    doc = r#" | `onset-detection` | `operations::onset` | `transforms`, `peak-picking`, `processing` |"#
+)]
+#![cfg_attr(
+    feature = "beat-tracking",
+    doc = r#" | `beat-tracking` | [`operations::beat`], [`operations::rhythm`] | `onset-detection` |"#
+)]
+#![cfg_attr(
+    not(feature = "beat-tracking"),
+    doc = r#" | `beat-tracking` | `operations::beat`, `operations::rhythm` | `onset-detection` |"#
+)]
+#![cfg_attr(
+    feature = "decomposition",
+    doc = r#" | `decomposition` | [`operations::hpss`] | `onset-detection` |"#
+)]
+#![cfg_attr(
+    not(feature = "decomposition"),
+    doc = r#" | `decomposition` | `operations::hpss` | `onset-detection` |"#
+)]
+#![cfg_attr(
+    feature = "pitch-analysis",
+    doc = r#" | `pitch-analysis` | [`operations::pitch_analysis`], [`operations::pitch_tracking`] | `transforms`, `sequence` |"#
+)]
+#![cfg_attr(
+    not(feature = "pitch-analysis"),
+    doc = r#" | `pitch-analysis` | `operations::pitch_analysis`, `operations::pitch_tracking` | `transforms`, `sequence` |"#
+)]
+#![cfg_attr(
+    feature = "effects",
+    doc = r#" | `effects` | [`operations::effects`] | `transforms`, `resampling`, `editing`, `sequence` |"#
+)]
+#![cfg_attr(
+    not(feature = "effects"),
+    doc = r#" | `effects` | `operations::effects` | `transforms`, `resampling`, `editing`, `sequence` |"#
+)]
+#![cfg_attr(
+    feature = "sequence",
+    doc = r#" | `sequence` | [`operations::sequence`] | |"#
+)]
+#![cfg_attr(
+    not(feature = "sequence"),
+    doc = r#" | `sequence` | `operations::sequence` | |"#
+)]
+#![cfg_attr(
+    feature = "linalg",
+    doc = r#" | `linalg` | [`operations::linalg`] | |"#
+)]
+#![cfg_attr(
+    not(feature = "linalg"),
+    doc = r#" | `linalg` | `operations::linalg` | |"#
+)]
+#![cfg_attr(
+    feature = "feature-inversion",
+    doc = r#" | `feature-inversion` | [`operations::inverse`] | `feature-extraction`, `effects`, `linalg` |"#
+)]
+#![cfg_attr(
+    not(feature = "feature-inversion"),
+    doc = r#" | `feature-inversion` | `operations::inverse` | `feature-extraction`, `effects`, `linalg` |"#
+)]
+#![cfg_attr(
+    feature = "factorization",
+    doc = r#" | `factorization` | [`operations::factorization`] | `linalg` |"#
+)]
+#![cfg_attr(
+    not(feature = "factorization"),
+    doc = r#" | `factorization` | `operations::factorization` | `linalg` |"#
+)]
+#![cfg_attr(
+    feature = "pitch-filterbank",
+    doc = r#" | `pitch-filterbank` | [`operations::pitch_filterbank`] | `iir-filtering`, `resampling`, `transforms` |"#
+)]
+#![cfg_attr(
+    not(feature = "pitch-filterbank"),
+    doc = r#" | `pitch-filterbank` | `operations::pitch_filterbank` | `iir-filtering`, `resampling`, `transforms` |"#
+)]
+#![cfg_attr(
+    feature = "mellin",
+    doc = r#" | `mellin` | [`operations::mellin`] | `transforms` |"#
+)]
+#![cfg_attr(
+    not(feature = "mellin"),
+    doc = r#" | `mellin` | `operations::mellin` | `transforms` |"#
+)]
+#![cfg_attr(
+    feature = "segmentation",
+    doc = r#" | `segmentation` | [`operations::segment`] | `sequence`, `transforms` |"#
+)]
+#![cfg_attr(
+    not(feature = "segmentation"),
+    doc = r#" | `segmentation` | `operations::segment` | `sequence`, `transforms` |"#
+)]
+#![cfg_attr(
+    feature = "psychoacoustic",
+    doc = r#" | `psychoacoustic` | [`codecs`], [`codecs::perceptual`] | `transforms` |"#
+)]
+#![cfg_attr(
+    not(feature = "psychoacoustic"),
+    doc = r#" | `psychoacoustic` | `codecs`, `codecs::perceptual` | `transforms` |"#
 )]
 #![cfg_attr(
     feature = "opus-codec",
-    doc = r#" | `opus-codec` | [`codecs::opus`] |"#
+    doc = r#" | `opus-codec` | [`codecs::opus`] | `psychoacoustic`, `statistics` |"#
 )]
 #![cfg_attr(
     not(feature = "opus-codec"),
-    doc = r#" | `opus-codec` | `codecs::opus` |"#
+    doc = r#" | `opus-codec` | `codecs::opus` | `psychoacoustic`, `statistics` |"#
+)]
+#![cfg_attr(
+    feature = "plotting",
+    doc = r#" | `plotting` | [`operations::plotting`] | `channels`, `transforms`, `editing` |"#
+)]
+#![cfg_attr(
+    not(feature = "plotting"),
+    doc = r#" | `plotting` | `operations::plotting` | `channels`, `transforms`, `editing` |"#
 )]
 #![cfg_attr(
     feature = "fixed-size-audio",
-    doc = r#" | `fixed-size-audio` | [`fixed_audio`] |"#
+    doc = r#" | `fixed-size-audio` | [`fixed_audio`] | |"#
 )]
 #![cfg_attr(
     not(feature = "fixed-size-audio"),
-    doc = r#" | `fixed-size-audio` | `fixed_audio` |"#
+    doc = r#" | `fixed-size-audio` | `fixed_audio` | |"#
 )]
 #![cfg_attr(
     feature = "educational",
-    doc = r#" | `educational` | [`educational`] |"#
+    doc = r#" | `educational` | [`educational`] | `processing`, `fancy` |"#
 )]
 #![cfg_attr(
     not(feature = "educational"),
-    doc = r#" | `educational` | `educational` |"#
+    doc = r#" | `educational` | `educational` | `processing`, `fancy` |"#
 )]
 #![cfg_attr(
     all(feature = "educational", feature = "full_no_plotting"),
-    doc = r#" | `educational` + `full_no_plotting` | [`guide`] |"#
+    doc = r#" | `educational` + `full_no_plotting` | [`guide`] | |"#
 )]
 #![cfg_attr(
     not(all(feature = "educational", feature = "full_no_plotting")),
-    doc = r#" | `educational` + `full_no_plotting` | `guide` |"#
+    doc = r#" | `educational` + `full_no_plotting` | `guide` | |"#
 )]
 #![cfg_attr(
     feature = "full_no_plotting",
-    doc = r#" | `full_no_plotting` | [`librosa_migration`], [`moving_from_librosa_rust`] |"#
+    doc = r#" | `full_no_plotting` | [`librosa_migration`], [`moving_from_librosa_rust`] | every feature above except `plotting` and `educational` |"#
 )]
 #![cfg_attr(
     not(feature = "full_no_plotting"),
-    doc = r#" | `full_no_plotting` | `librosa_migration`, `moving_from_librosa_rust` |"#
+    doc = r#" | `full_no_plotting` | `librosa_migration`, `moving_from_librosa_rust` | every feature above except `plotting` and `educational` |"#
 )]
+//! | `full` | | `full_no_plotting`, `plotting` |
 //!
-//! ## Migration guides
+//! Features that change behaviour rather than add modules:
 //!
+//! | Feature | Effect |
+//! |---|---|
+//! | `random-generation` | White, pink and brown noise generators, and the operations that add noise |
+//! | `parallel` | Encodes and decodes the segments of the perceptual codec on several threads |
+//! | `simd` | Vectorised conversion between `f32` and `i16` or `i32` in [`simd_conversions`] |
+//! | `fancy` | Coloured diagnostics, with carets, for [`AudioSampleError`] |
+//! | `static-plots` | PNG and SVG export of plots; enables `plotting` |
+//! | `html_view` | Opens plots in a browser window |
+//! | `python` | Python conversion of [`I24`], for the Python bindings |
+//!
+//! `full` enables everything except `educational`, `fancy`, `simd`,
+//! `static-plots`, `html_view` and `python`.
+//!
+//! ### Performance
+//!
+//! Constructors can borrow existing buffers, and frame iteration and the array
+//! accessors return views, so reading audio rarely copies it. Analysis of 8-, 16- and 24-bit audio
+//! computes in `f32`, and FFT plans are cached per thread and reused across calls.
+//!
+//! ## Learning and related crates
+//!
+#![cfg_attr(
+    all(feature = "educational", feature = "full_no_plotting"),
+    doc = r#" - [`guide`]: a short course in speech and audio processing, fourteen chapters"#
+)]
+#![cfg_attr(
+    not(all(feature = "educational", feature = "full_no_plotting")),
+    doc = r#" - `guide`: a short course in speech and audio processing, fourteen chapters"#
+)]
+//!   from sampling to perceptual coding. Every code block is a doctest, and each
+//!   chapter has a runnable lab in `examples/tutorial_NN_*.rs`.
+//! - [The illustrated book](https://jmg049.github.io/audio_samples/): the same
+//!   chapters with figures computed by the library.
+#![cfg_attr(
+    feature = "educational",
+    doc = r#" - [`educational`]: the explain API. Configs and topics return documents with"#
+)]
+#![cfg_attr(
+    not(feature = "educational"),
+    doc = r#" - `educational`: the explain API. Configs and topics return documents with"#
+)]
+//!   the formula the code evaluates, each symbol with its unit, and the numbers for
+//!   your configuration.
 #![cfg_attr(
     feature = "full_no_plotting",
-    doc = r#" The [`librosa_migration`] and [`moving_from_librosa_rust`] modules (built with"#
+    doc = r#" - [`librosa_migration`] and [`moving_from_librosa_rust`]: librosa functions"#
 )]
 #![cfg_attr(
     not(feature = "full_no_plotting"),
-    doc = r#" The `librosa_migration` and `moving_from_librosa_rust` modules (built with"#
+    doc = r#" - `librosa_migration` and `moving_from_librosa_rust`: librosa functions"#
 )]
-//! `full_no_plotting` or `full`; also `documentation/LIBROSA_MIGRATION.md` and
-//! `documentation/MOVING_FROM_LIBROSA_RUST.md`) map Python librosa functions to their
-//! counterparts in this crate and list the differences.
-//!
-//! ## Error Handling
-//!
-//! All fallible operations return [`AudioSampleResult<T>`], which is an alias for
-//! `Result<T, AudioSampleError>`. Errors are structured so that the variant indicates
-//! the category of failure and the inner type provides detail.
-//!
-//! Every error implements [`miette::Diagnostic`] as well as [`std::error::Error`].
-//! Each variant carries a stable, namespaced **code**
-//! (`audio_samples::<domain>::<variant>`) for programmatic matching and an
-//! actionable **help** hint. Failures that arise from parsing user-supplied text
-//! (note names, enum `FromStr`) additionally carry a source span pointing a caret
-//! at the offending character. Enable the `fancy` feature to render the coloured
-//! caret-underline output (see `examples/error_diagnostics.rs`); library consumers
-//! who do not opt in get plain [`Display`](std::fmt::Display) output and do not compile the graphical
-//! dependencies.
-//!
-//! ```rust
-//! use audio_samples::{AudioSampleError, AudioSampleResult, ParameterError};
-//!
-//! let audio_result: AudioSampleResult<()> = Err(AudioSampleError::Parameter(
-//!     ParameterError::invalid_value("window_size", "must be > 0"),
-//! ));
-//!
-//! match audio_result {
-//!     Ok(()) => {}
-//!     Err(AudioSampleError::Conversion(err)) => eprintln!("Conversion failed: {err}"),
-//!     Err(AudioSampleError::Parameter(err)) => eprintln!("Invalid parameter: {err}"),
-//!     Err(other_err) => eprintln!("Other error: {other_err}"),
-//! }
-//! ```
-//!
-//! ## Full Examples
-//!
-//! Examples are in the repository (see `examples/`) and in the crate-level docs on
-//! <https://docs.rs/audio_samples>.
-//!
-//! ## Quick Start
-//!
-//! ### Creating Audio Data
-//!
-//! ```rust
-//! use audio_samples::{AudioSamples, sample_rate};
-//! use ndarray::array;
-//!
-//! // Create mono audio
-//! let data = array![0.1f32, 0.5, -0.3, 0.8, -0.2];
-//! let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
-//!
-//! // Create stereo audio (channels × samples)
-//! let stereo_data = array![
-//!     [0.1f32, 0.5, -0.3],  // Left channel
-//!     [0.8f32, -0.2, 0.4]   // Right channel
-//! ];
-//! let stereo_audio = AudioSamples::new_multi_channel(stereo_data, sample_rate!(44100)).unwrap();
-//! ```
-//!
-//! ### Basic Statistics
-//!
-//! Requires the `statistics` feature.
-//!
-//! ```rust,ignore
-//! use audio_samples::{AudioStatistics, sine_wave, sample_rate};
-//! use std::time::Duration;
-//!
-//! // Generate a 440 Hz sine wave at 44.1 kHz sample rate, amplitude 1.0
-//! let audio = sine_wave::<f32>(440.0, Duration::from_secs_f32(1.0), sample_rate!(44100), 1.0);
-//!
-//! let peak           = audio.peak();
-//! let min            = audio.min_sample();
-//! let max            = audio.max_sample();
-//! let mean           = audio.mean();
-//! let rms            = audio.rms();
-//! let variance       = audio.variance();
-//! let zero_crossings = audio.zero_crossings();
-//! ```
-//!
-//! ### Processing Operations
-//!
-//! Requires the `processing` feature.
-//!
-//! ```rust,ignore
-//! use audio_samples::{AudioProcessing, NormalizationConfig, AudioSamples, sample_rate};
-//! use ndarray::array;
-//!
-//! let data = array![0.1f32, 0.5, -0.3, 0.8, -0.2];
-//! let audio = AudioSamples::new_mono(data, sample_rate!(44100)).unwrap();
-//!
-//! // Method chaining: each borrowing operation returns a NEW owned value, so the
-//! // results compose directly. `scale` is infallible (returns `Self`, no `?`),
-//! // while `normalize`/`remove_dc_offset` are fallible. Use the `*_in_place`
-//! // variants instead when you want to mutate `audio` rather than build a copy.
-//! let audio = audio
-//!     .normalize(NormalizationConfig::peak(1.0))
-//!     .unwrap()
-//!     .scale(0.5)
-//!     .remove_dc_offset()
-//!     .unwrap();
-//! ```
-//!
-//! ### Type Conversions
-//!
-//! ```rust
-//! use audio_samples::{AudioSamples, AudioTypeConversion, sample_rate};
-//! use ndarray::array;
-//!
-//! let audio_f32 = AudioSamples::new_mono(array![1.0f32, 2.0, 3.0], sample_rate!(44100)).unwrap();
-//! let audio_i16 = audio_f32.clone().to_type::<i16>();
-//! let audio_f64 = audio_f32.to_type::<f64>();
-//! ```
-//!
-//! ### Iterating Over Audio Data
-//!
-//! ```rust
-//! use audio_samples::{AudioSampleIterators, AudioSamples, sample_rate};
-//! use ndarray::array;
-//!
-//! let audio = AudioSamples::new_mono(
-//!     array![1.0f32, 2.0, 3.0, 4.0],
-//!     sample_rate!(44100),
-//! ).unwrap();
-//!
-//! // Iterate by frames (one sample per channel per time step)
-//! for frame in audio.frames() {
-//!     println!("Frame: {:?}", frame);
-//! }
-//!
-//! // Iterate by channels
-//! for channel in audio.channels() {
-//!     println!("Channel: {:?}", channel);
-//! }
-//! ```
-//!
-//! ### Psychoacoustic Analysis
-//!
-//! Requires the `psychoacoustic` feature.
-//!
-//! ```rust,ignore
-//! use audio_samples::{
-//!     AudioPerceptualAnalysis, BandLayout, PsychoacousticConfig, sine_wave, sample_rate,
-//! };
-//! use non_empty_slice::NonEmptySlice;
-//! use spectrograms::WindowType;
-//! use std::num::NonZeroUsize;
-//! use std::time::Duration;
-//!
-//! let signal = sine_wave::<f32>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.8);
-//!
-//! // 24 Bark critical bands mapped onto 1024 MDCT bins.
-//! let layout = BandLayout::bark(
-//!     NonZeroUsize::new(24).unwrap(),
-//!     44100.0,
-//!     NonZeroUsize::new(1024).unwrap(),
-//! );
-//!
-//! let weights = vec![1.0_f32; 24];
-//! let config = PsychoacousticConfig::new(
-//!     -60.0, 14.5, 5.5, 25.0, 6.0,
-//!     NonEmptySlice::from_slice(&weights).unwrap(),
-//!     1e-10,
-//! );
-//!
-//! let result = signal
-//!     .analyse_psychoacoustic(WindowType::Hanning, &layout, &config)
-//!     .unwrap();
-//!
-//! // Bands with positive SMR are audible above the masking threshold.
-//! for metric in result.band_metrics.as_slice().iter() {
-//!     if metric.signal_to_mask_ratio > 0.0 {
-//!         println!(
-//!             "{:.0} Hz - SMR {:.1} dB (importance {:.2})",
-//!             metric.band.centre_frequency,
-//!             metric.signal_to_mask_ratio,
-//!             metric.importance,
-//!         );
-//!     }
-//! }
-//! ```
-//!
-//! ## Core Type System
-//!
-//! ### Supported Sample Types
-//!
-//! | Type | Width | Notes |
-//! |---|---|---|
-//! | `u8`  | 8-bit unsigned  | Mid-scale (128) represents silence |
-//! | `i16` | 16-bit signed   | CD-quality audio |
-//! | [`I24`] | 24-bit signed | From the `i24` crate |
-//! | `i32` | 32-bit signed   | High-dynamic-range integer audio |
-//! | `f32` | 32-bit float    | Most DSP operations use this type |
-//! | `f64` | 64-bit float    | High-precision processing |
-//!
-//! ### Type System Traits
-//!
-//! - **[`AudioSample`]** - Core trait all sample types implement. Provides constants
-//!   (`MAX`, `MIN`, `BITS`, `BYTES`, `LABEL`) and low-level byte operations.
-//!
-//! - **[`ConvertTo<T>`]** / **[`ConvertFrom<T>`]** - Audio-aware conversions with
-//!   correct scaling between bit depths (e.g. `i16 → f32` normalises to `[-1.0, 1.0]`).
-//!
-//! - **[`CastFrom<T>`]** / **[`CastInto<T>`]** - Raw numeric casts without scaling.
-//!   Use these when you need the raw integer value as a float for computation,
-//!   not as an audio amplitude.
-//!
-//! - **[`AudioTypeConversion`]** - High-level conversion methods on [`AudioSamples<T>`]
-//!   such as `as_f32()`, `as_i16()`, and `as_type::<U>()`.
-//!
-//! ## Signal Generation
-//!
-//! The [`utils::generation`] module provides functions for creating test and
-//! reference signals: [`sine_wave`], [`cosine_wave`], [`square_wave`],
-//! [`triangle_wave`], [`sawtooth_wave`], [`chirp`], [`exponential_chirp`] (also
-//! covering logarithmic sweeps), the band-limited oscillators
-//! [`square_wave_bandlimited`], [`sawtooth_wave_bandlimited`], and
-//! [`triangle_wave_bandlimited`], [`fm_signal`], [`impulse`], [`silence`],
-//! [`compound_tone`], and [`am_signal`]. With the `random-generation` feature,
-//! `white_noise`, `pink_noise`, and `brown_noise` are also available.
-//!
-//! ```rust
-//! use audio_samples::{sine_wave, sample_rate};
-//! use audio_samples::utils::comparison;
-//! use std::time::Duration;
-//!
-//! let a = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(44100), 1.0);
-//! let b = sine_wave::<f32>(440.0, Duration::from_secs(1), sample_rate!(44100), 1.0);
-//! let corr: f64 = comparison::correlation(&a, &b).unwrap();
-//! assert!(corr > 0.99);
-//! ```
-//!
-//! ## Documentation
-//!
-//! Full API documentation is available at [docs.rs/audio_samples](https://docs.rs/audio_samples).
-//!
-//! ## License
-//!
-//! MIT
-//!
-//! ## Contributing
-//!
-//! Contributions are welcome. Please open an issue or pull request on
-//! [GitHub](https://github.com/jmg049/audio_samples).
+//!   mapped to their counterparts here, and a worked port of a librosa pipeline.
+//! - [`audio_samples_io`](https://docs.rs/audio_samples_io): read WAV (including
+//!   RF64 and BW64), FLAC and AIFF as `AudioSamples` and write WAV, FLAC and AIFF,
+//!   whole or streamed.
+//! - [`audio_samples_streaming`](https://docs.rs/audio_samples_streaming): chunked
+//!   streaming of `AudioSamples` between files, audio devices and async runtimes.
+//! - [`audio_samples_python`](https://github.com/jmg049/audio_samples_python): the
+//!   same types and operations from Python and NumPy (`pip install audio_samples`),
+//!   with the guide's chapters as notebooks.
+//! - [`spectrograms`](https://docs.rs/spectrograms) and [`i24`](https://docs.rs/i24):
+//!   dependencies whose types appear in public signatures (`WindowType`,
+//!   `StftParams`, `I24`).
 
 // docs.rs builds with `--cfg docsrs` on nightly: label feature-gated items with the
 // features they need.
@@ -651,8 +715,6 @@ macro_rules! nzu {
     }};
 }
 
-/// Codec infrastructure: the [`AudioCodec`] trait, `encode`/`decode` free functions,
-/// and the [`PerceptualCodec`] implementation (requires `feature = "psychoacoustic"`).
 #[cfg(feature = "psychoacoustic")]
 pub mod codecs;
 pub mod conversions;
@@ -660,49 +722,34 @@ pub mod iterators;
 pub mod operations;
 #[cfg(feature = "resampling")]
 pub mod resampling;
-/// Core trait definitions for audio sample types and operations.
 pub mod traits;
 pub mod utils;
 
 mod audio_float;
 mod error;
-/// Fixed-size audio buffer types whose geometry is encoded in the type system.
 #[cfg(feature = "fixed-size-audio")]
 pub mod fixed_audio;
 mod repr;
 
 pub mod simd_conversions;
 
-/// Educational / explainable layer: step-by-step operation explanations with
-/// before/after waveforms and term-maths formula rendering.
-///
-/// Enable with `--features educational`. See [`educational::open_explanation_document`]
-/// for the primary entry point.
 #[cfg(feature = "educational")]
 pub mod educational;
 
-/// Documentation only: the librosa to audio_samples migration guide.
-///
-/// This module contains no items. It renders `documentation/LIBROSA_MIGRATION.md`
-/// and runs its examples as doctests. It exists only when building documentation
-/// or doctests with `full_no_plotting` (or `full`) enabled.
+// Documentation only: renders documentation/LIBROSA_MIGRATION.md and runs its
+// examples as doctests. The module has no items.
 #[cfg(all(feature = "full_no_plotting", any(doc, doctest)))]
 pub mod librosa_migration {
     #![doc = include_str!("../documentation/LIBROSA_MIGRATION.md")]
 }
 
-/// Documentation only: porting a librosa pipeline to Rust.
-///
-/// This module contains no items. It renders
-/// `documentation/MOVING_FROM_LIBROSA_RUST.md` and runs its examples as doctests.
+// Documentation only: renders documentation/MOVING_FROM_LIBROSA_RUST.md and runs
+// its examples as doctests. The module has no items.
 #[cfg(all(feature = "full_no_plotting", any(doc, doctest)))]
 pub mod moving_from_librosa_rust {
     #![doc = include_str!("../documentation/MOVING_FROM_LIBROSA_RUST.md")]
 }
 
-/// Learning guide: a short course in speech and audio processing, with one
-/// chapter per syllabus topic. Every chapter's code is a doctest and has a
-/// matching runnable lab in `examples/tutorial_NN_*.rs`.
 #[cfg(all(feature = "educational", feature = "full_no_plotting"))]
 pub mod guide;
 
@@ -1009,9 +1056,8 @@ where
     /// # Safety
     ///
     /// The caller must ensure that this `NdResult` is the [`Mono`](NdResult::Mono)
-    /// variant. Calling this on a [`MultiChannel`](NdResult::MultiChannel) value is
-    /// a programmer error and will panic in debug builds. There is no undefined
-    /// behaviour, but the panic is not recoverable.
+    /// variant. Calling this on a [`MultiChannel`](NdResult::MultiChannel) value
+    /// panics in every build profile. It cannot cause undefined behaviour.
     ///
     /// # Returns
     ///
@@ -1074,8 +1120,8 @@ where
     ///
     /// The caller must ensure that this `NdResult` is the
     /// [`MultiChannel`](NdResult::MultiChannel) variant. Calling this on a
-    /// [`Mono`](NdResult::Mono) value is a programmer error and will panic in debug
-    /// builds. There is no undefined behaviour, but the panic is not recoverable.
+    /// [`Mono`](NdResult::Mono) value panics in every build profile. It cannot
+    /// cause undefined behaviour.
     ///
     /// # Returns
     ///

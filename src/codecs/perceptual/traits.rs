@@ -1,4 +1,5 @@
-//! [`AudioPerceptualAnalysis`] trait definition.
+//! [`AudioPerceptualAnalysis`]: psychoacoustic analysis as a method of
+//! [`AudioSamples`](crate::AudioSamples).
 
 use spectrograms::WindowType;
 
@@ -18,8 +19,8 @@ use super::{BandLayout, PerceptualAnalysisResult, PsychoacousticConfig};
 ///    psychoacoustic model in [`PsychoacousticConfig`].
 ///
 /// The result contains the raw MDCT coefficients (useful for downstream
-/// quantization), the per-bin energies, and the per-band [`BandMetrics`] that
-/// summarise audibility, masking, and allowed quantization noise.
+/// quantisation), the per-bin energies, and the per-band [`BandMetrics`] that
+/// summarise audibility, masking, and allowed quantisation noise.
 ///
 /// ## Usage
 ///
