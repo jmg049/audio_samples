@@ -1,46 +1,40 @@
-//! Codec infrastructure: the [`AudioCodec`] trait, `encode`/`decode` free functions,
-//! and built-in codec implementations (requires `feature = "psychoacoustic"`).
+//! Perceptual audio coding for study: psychoacoustic analysis, bit allocation,
+//! quantisation and two complete codecs built from them. The codecs show how
+//! masking drives compression; they are not production codecs, and their output is
+//! an in-memory structure, not a file format.
 //!
-//! ## What
-//!
-//! This module defines the codec abstraction layer for `audio_samples`. It provides
-//! the [`AudioCodec`] trait - a common interface over encode/decode round-trips -
-//! together with the [`PerceptualCodec`] and [`StereoPerceptualCodec`] implementations
-//! that use psychoacoustic masking to drive perceptual quantization.
-//!
+//! [`AudioCodec`] is the encode and decode contract, and [`encode`] and [`decode`]
+//! call it. [`PerceptualCodec`](crate::PerceptualCodec) and
+//! [`StereoPerceptualCodec`] are MDCT codecs that allocate bits from the
+//! signal-to-mask ratio of each band ([`perceptual`]).
 #![cfg_attr(
     feature = "opus-codec",
-    doc = r#" An Opus-inspired codec ([`crate::codecs::opus::OpusCodec`]) is also available under the"#
+    doc = r#" [`opus`] adds a codec with the SILK, CELT and hybrid structure of Opus."#
 )]
 #![cfg_attr(
     not(feature = "opus-codec"),
-    doc = r#" An Opus-inspired codec (`OpusCodec`) is also available under the"#
+    doc = r#" `opus` adds a codec with the SILK, CELT and hybrid structure of Opus."#
 )]
-//! `opus-codec` feature. It supports SILK (speech) and CELT (music) modes.
 //!
-//! ## Why
-//!
-//! `audio_samples` provides the signal-processing components that perceptual codecs
-//! need (MDCT, masking models, bit allocation, quantization), but leaves the codec
-//! contract - how those building blocks are composed and how state is packaged for
-//! transmission - to this layer. The [`AudioCodec`] trait defines that contract.
-//!
-//! ## How
-//!
-//! ```rust,ignore
-//! use audio_samples::codecs::{encode, decode, PerceptualCodec};
-//! use audio_samples::{BandLayout, PsychoacousticConfig};
+//! ```rust
+//! use audio_samples::codecs::{decode, encode};
+//! use audio_samples::{BandLayout, PerceptualCodec, PsychoacousticConfig, sample_rate, sine_wave};
 //! use spectrograms::WindowType;
 //! use std::num::NonZeroUsize;
+//! use std::time::Duration;
 //!
+//! let audio = sine_wave::<f32>(440.0, Duration::from_millis(200), sample_rate!(44100), 0.5);
+//!
+//! // 24 Bark bands over 1024 MDCT bins, with the MPEG-1 masking model.
 //! let n_bands = NonZeroUsize::new(24).unwrap();
-//! let layout  = BandLayout::bark(n_bands, 44100.0, NonZeroUsize::new(1024).unwrap());
+//! let layout = BandLayout::bark(n_bands, 44100.0, NonZeroUsize::new(1024).unwrap());
 //! let weights = PsychoacousticConfig::uniform_weights(n_bands);
-//! let config  = PsychoacousticConfig::mpeg1(weights.as_non_empty_slice());
+//! let config = PsychoacousticConfig::mpeg1(weights.as_non_empty_slice());
 //!
 //! let codec = PerceptualCodec::new(layout, config, WindowType::Hanning, 128_000, 1);
-//! let encoded    = encode(&audio, codec)?;
-//! let recovered  = decode::<PerceptualCodec, f32>(encoded)?;
+//! let encoded = encode(&audio, codec).unwrap();
+//! let decoded = decode::<PerceptualCodec, f32>(encoded).unwrap();
+//! assert_eq!(decoded.samples_per_channel(), audio.samples_per_channel());
 //! ```
 
 pub mod perceptual;
