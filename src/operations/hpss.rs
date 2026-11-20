@@ -1,22 +1,31 @@
-//! Harmonic/Percussive Source Separation (HPSS) for AudioSamples.
+//! Harmonic-percussive source separation by median filtering of the STFT
+//! magnitude (Fitzgerald, 2010): [`AudioDecomposition::hpss`] and [`HpssConfig`].
 //!
-//! HPSS separates audio signals into harmonic and percussive components using
-//! Short-Time Fourier Transform (STFT) magnitude median filtering. This module
-//! implements the core HPSS algorithm based on Fitzgerald's method.
+//! Sustained tones are smooth along time and percussive hits are smooth along
+//! frequency, so median filters in the two directions enhance one component each.
+//! Masks built from the two filtered spectrograms split the STFT, and the inverse
+//! STFT gives the harmonic and percussive signals. This implementation is mono.
+//! For multi-channel input, margins and output trimmed to the input length, use
+#![cfg_attr(
+    feature = "effects",
+    doc = r#" [`AudioEffects::harmonic_percussive`](crate::AudioEffects::harmonic_percussive)"#
+)]
+#![cfg_attr(
+    not(feature = "effects"),
+    doc = r#" `AudioEffects::harmonic_percussive`"#
+)]
+//! (see [Choosing between overlapping APIs](crate::operations#choosing-between-overlapping-apis)).
 //!
-//! ## Algorithm Overview
+//! ```rust
+//! use audio_samples::{AudioDecomposition, AudioSamples, sample_rate, sine_wave};
+//! use audio_samples::operations::hpss::HpssConfig;
+//! use std::time::Duration;
 //!
-//! 1. Compute STFT magnitude spectrogram of the input signal
-//! 2. Apply median filtering along time axis to enhance harmonic content
-//! 3. Apply median filtering along frequency axis to enhance percussive content
-//! 4. Generate binary or soft masks based on the filtered spectrograms
-//! 5. Apply masks to the original complex STFT and reconstruct time-domain signals
-//!
-//! For separation with kernel 31, power-2 soft masks, margins, `reflect` median
-//! boundaries (d c b a | a b c d), multichannel input and output trimmed to the input
-//! length, see `operations::effects` (feature `effects`):
-//! `AudioEffects::harmonic_percussive`, `hpss_spectrogram` and `softmask`. This module
-//! keeps its own conventions.
+//! let audio = sine_wave::<f64>(440.0, Duration::from_millis(250), sample_rate!(16000), 0.5);
+//! let (harmonic, percussive) = audio.hpss(&HpssConfig::realtime()).unwrap();
+//! assert_eq!(harmonic.sample_rate(), audio.sample_rate());
+//! assert_eq!(percussive.samples_per_channel(), harmonic.samples_per_channel());
+//! ```
 //!
 //! ## Definitions
 //!
@@ -34,20 +43,6 @@
 //! (d c b | a b c d …). An even kernel takes the mean of the two middle values.
 //!
 //! The default STFT window here is the symmetric Hann.
-//!
-//! ## Example
-//!
-//! ```rust
-//! use audio_samples::{AudioSamples, sample_rate, sine_wave};
-//! use audio_samples::operations::hpss::HpssConfig;
-//! use audio_samples::operations::traits::AudioDecomposition;
-//! use std::time::Duration;
-//!
-//! let audio = sine_wave::<f64>(440.0, Duration::from_millis(250), sample_rate!(16000), 0.5);
-//! let (harmonic, percussive) = audio.hpss(&HpssConfig::realtime()).unwrap();
-//! assert_eq!(harmonic.sample_rate(), audio.sample_rate());
-//! assert_eq!(percussive.samples_per_channel(), harmonic.samples_per_channel());
-//! ```
 //!
 //! ## References
 //!
@@ -111,7 +106,7 @@ impl HpssConfig {
         }
     }
 
-    /// Create configuration optimized for musical content.
+    /// Create configuration optimised for musical content.
     ///
     /// Uses larger filters for stronger separation, suitable for complex musical material:
     /// - Larger harmonic kernel for better tonal separation
@@ -137,7 +132,7 @@ impl HpssConfig {
         }
     }
 
-    /// Create configuration optimized for percussive content.
+    /// Create configuration optimised for percussive content.
     ///
     /// Uses asymmetric filters favoring percussive separation:
     /// - Moderate harmonic filtering
@@ -163,7 +158,7 @@ impl HpssConfig {
         }
     }
 
-    /// Create configuration optimized for harmonic content.
+    /// Create configuration optimised for harmonic content.
     ///
     /// Uses asymmetric filters favoring harmonic separation:
     /// - Strong harmonic filtering

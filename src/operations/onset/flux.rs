@@ -1,11 +1,7 @@
-//! Spectral flux computation kernels.
+//! Spectral flux kernels: the frame-to-frame change of a spectrogram, which rises at
+//! onsets because a new note or hit adds energy across many bins.
 //!
-//! This module provides low-level functions for computing spectral flux-the rate of change in
-//! a signal's frequency spectrum over time. Spectral flux is a fundamental feature for onset
-//! detection, as sudden increases in spectral energy or magnitude typically correspond to
-//! note onsets, percussive hits, or other transient events.
-//!
-//! Four spectral flux variants are provided, each with different characteristics:
+//! The four variants:
 //! - **Energy flux** ([`energy_flux`]): `Σ_b max(0, X[b,t] − X[b,t−1])` on the values it is
 //!   given (no squaring); with a magnitude spectrogram this is the standard half-wave-rectified
 //!   spectral flux
