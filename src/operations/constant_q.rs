@@ -1933,12 +1933,18 @@ fn icqt_rows<F: AudioFloat>(
             .collect();
         let basis = basis.cast::<F>();
         let mut d = Array3::<Complex<F>>::zeros((channels, n_freq, n_frames));
+        let mut coefs = vec![Complex::new(F::zero(), F::zero()); n_frames];
         for ch in 0..channels {
             for (k, (row, &w)) in basis.rows.iter().zip(&weights).enumerate() {
-                for t in 0..n_frames {
-                    let coef = c[[ch, lo + k, t]] * w;
-                    for (&j, &v) in row.idx.iter().zip(&row.val) {
-                        d[[ch, j, t]] += v.conj() * coef;
+                for (coef, &v) in coefs.iter_mut().zip(c.slice(s![ch, lo + k, ..])) {
+                    *coef = v * w;
+                }
+                // Frame by frame along each bin's row of `d` (each bin's sum
+                // still adds the filters in order).
+                for (&j, &v) in row.idx.iter().zip(&row.val) {
+                    let v = v.conj();
+                    for (dst, &coef) in d.slice_mut(s![ch, j, ..]).iter_mut().zip(&coefs) {
+                        *dst += v * coef;
                     }
                 }
             }
