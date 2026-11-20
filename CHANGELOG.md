@@ -422,7 +422,8 @@ The librosa-compatible API is unreleased, so these are changes to the
 - **No dead-code warnings on partial feature sets.** Building with `iir-filtering` but not
   `pitch-filterbank` warned that `bandpass_order` was never used, and building with `sequence`
   but not `effects` warned about the recurrence-link helpers. Each is now compiled only with the
-  feature that uses it.
+  feature that uses it. `pitch-analysis` with `feature-extraction` or `feature-inversion` warned
+  about vectorised helpers that only the `beat-tracking` and `effects` modules use.
 
 - **IIR high-pass filters of order ≠ 2 were mirrored around fs/4.** The
   Butterworth and Chebyshev I high-pass designs were derived from the

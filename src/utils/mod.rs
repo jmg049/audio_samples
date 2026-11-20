@@ -69,13 +69,16 @@ pub mod example_clips;
 pub(crate) mod fast_math;
 pub mod generation;
 pub mod notation;
-// Used by the spectrum, feature and pitch modules; with only some of those
-// features enabled, parts of these helpers are unused.
+// Used by the spectrum, feature, pitch, rhythm (`beat-tracking`) and effects
+// modules; with only some of those features enabled, parts of these helpers are
+// unused.
 #[cfg_attr(
     not(all(
         feature = "transforms",
         feature = "feature-extraction",
-        feature = "pitch-analysis"
+        feature = "pitch-analysis",
+        feature = "beat-tracking",
+        feature = "effects"
     )),
     allow(dead_code)
 )]
@@ -84,7 +87,9 @@ pub(crate) mod layout;
     not(all(
         feature = "transforms",
         feature = "feature-extraction",
-        feature = "pitch-analysis"
+        feature = "pitch-analysis",
+        feature = "beat-tracking",
+        feature = "effects"
     )),
     allow(dead_code)
 )]
