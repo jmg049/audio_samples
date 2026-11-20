@@ -60,9 +60,10 @@ impl PhaseSpectrumParams {
     /// A [`PhaseSpectrumParams`] with default settings.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust
     /// # use audio_samples::operations::plotting::PhaseSpectrumParams;
     /// let params = PhaseSpectrumParams::new();
+    /// assert!(!params.unwrap);
     /// ```
     #[inline]
     #[must_use]
@@ -288,7 +289,7 @@ impl PlotComponent for PhaseSpectrumPlot {
 /// invalid FFT size).
 ///
 /// # Example
-/// ```rust,no_run
+/// ```rust
 /// use audio_samples::{AudioSamples, sample_rate};
 /// use audio_samples::operations::plotting::{create_phase_spectrum_plot, PhaseSpectrumParams, PlotUtils};
 ///
@@ -296,6 +297,7 @@ impl PlotComponent for PhaseSpectrumPlot {
 /// let params = PhaseSpectrumParams::new().with_unwrap(true);
 /// let plot = create_phase_spectrum_plot(&audio, &params)?;
 /// let html = plot.html()?;
+/// assert!(html.contains("<html"));
 /// # Ok::<(), audio_samples::AudioSampleError>(())
 /// ```
 #[inline]

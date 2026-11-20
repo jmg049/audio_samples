@@ -48,9 +48,10 @@ impl LissajousParams {
     /// A [`LissajousParams`] with default settings.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust
     /// # use audio_samples::operations::plotting::LissajousParams;
     /// let params = LissajousParams::new();
+    /// assert_eq!(params.max_points, None);
     /// ```
     #[inline]
     #[must_use]
@@ -243,7 +244,7 @@ impl PlotComponent for LissajousPlot {
 /// exactly two channels.
 ///
 /// # Example
-/// ```rust,no_run
+/// ```rust
 /// use audio_samples::{AudioSamples, sample_rate};
 /// use audio_samples::operations::plotting::{create_lissajous_plot, LissajousParams, PlotUtils};
 /// use ndarray::array;
@@ -254,6 +255,7 @@ impl PlotComponent for LissajousPlot {
 /// )?;
 /// let plot = create_lissajous_plot(&audio, &LissajousParams::new())?;
 /// let html = plot.html()?;
+/// assert!(html.contains("<html"));
 /// # Ok::<(), audio_samples::AudioSampleError>(())
 /// ```
 #[inline]

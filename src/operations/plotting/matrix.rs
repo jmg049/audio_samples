@@ -374,12 +374,15 @@ fn block_peaks<F: AudioFloat>(y: ArrayView1<'_, F>, hop: usize) -> Vec<f64> {
 /// [`ParameterError`] if `y` is empty, `n_bars` is 0, or a parameter is out of range.
 ///
 /// # Examples
-/// ```no_run
+/// ```
+/// use audio_samples::operations::plotting::PlotUtils;
 /// use audio_samples::operations::plotting::matrix::plot_waveform_bars;
 /// use ndarray::Array1;
 ///
 /// let y = Array1::<f64>::zeros(1000);
 /// let plot = plot_waveform_bars(y.view(), 22050.0, 50, 0.4).unwrap();
+/// assert!(plot.html().unwrap().contains("<html"));
+/// assert!(plot_waveform_bars(y.view(), 22050.0, 0, 0.4).is_err());
 /// ```
 pub fn plot_waveform_bars<F: AudioFloat>(
     y: ArrayView1<'_, F>,
@@ -430,12 +433,14 @@ pub fn plot_waveform_bars<F: AudioFloat>(
 /// [`ParameterError`] if an input is empty or a parameter is out of range.
 ///
 /// # Examples
-/// ```no_run
+/// ```
+/// use audio_samples::operations::plotting::PlotUtils;
 /// use audio_samples::operations::plotting::matrix::plot_waveform_f0;
 /// use ndarray::{Array1, array};
 ///
 /// let y = Array1::<f64>::zeros(2048);
 /// let plot = plot_waveform_f0(y.view(), array![220.0, 220.0].view(), 22050.0, 1024, 12).unwrap();
+/// assert!(plot.html().unwrap().contains("<html"));
 /// ```
 pub fn plot_waveform_f0<F: AudioFloat>(
     y: ArrayView1<'_, F>,

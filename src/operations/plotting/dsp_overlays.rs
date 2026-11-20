@@ -25,12 +25,19 @@ use crate::{AudioSamples, StandardSample};
 ///   normalised audio)
 ///
 /// # Example
-/// ```rust,no_run
-/// use audio_samples::{AudioSamples, sample_rate, nzu};
+/// ```rust
 /// use audio_samples::operations::plotting::dsp_overlays;
+/// use audio_samples::{AudioSamples, nzu, sample_rate};
+/// use std::f64::consts::PI;
 ///
-/// let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(44100, 0.0f32), sample_rate!(44100))?;
+/// // One second of a 440 Hz sine at amplitude 0.8.
+/// let x = ndarray::Array1::from_shape_fn(44_100, |n| {
+///     0.8 * (2.0 * PI * 440.0 * n as f64 / 44_100.0).sin()
+/// });
+/// let audio = AudioSamples::new_mono(x, sample_rate!(44100))?;
 /// let (times, rms) = dsp_overlays::compute_windowed_rms(&audio, nzu!(2048), nzu!(512));
+/// assert_eq!(times.len(), rms.len());
+/// assert!((rms[0] - 0.8 / 2f64.sqrt()).abs() < 0.01);
 /// # Ok::<(), audio_samples::AudioSampleError>(())
 /// ```
 #[inline]
@@ -81,12 +88,19 @@ where
 ///   0.0-1.0 for normalised audio)
 ///
 /// # Example
-/// ```rust,no_run
-/// use audio_samples::{AudioSamples, sample_rate, nzu};
+/// ```rust
 /// use audio_samples::operations::plotting::dsp_overlays;
+/// use audio_samples::{AudioSamples, nzu, sample_rate};
+/// use std::f64::consts::PI;
 ///
-/// let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(44100, 0.0f32), sample_rate!(44100))?;
+/// // One second of a 440 Hz sine at amplitude 0.8.
+/// let x = ndarray::Array1::from_shape_fn(44_100, |n| {
+///     0.8 * (2.0 * PI * 440.0 * n as f64 / 44_100.0).sin()
+/// });
+/// let audio = AudioSamples::new_mono(x, sample_rate!(44100))?;
 /// let (times, peaks) = dsp_overlays::compute_windowed_peak(&audio, nzu!(2048), nzu!(512));
+/// assert_eq!(times.len(), peaks.len());
+/// assert!((peaks[0] - 0.8).abs() < 0.01);
 /// # Ok::<(), audio_samples::AudioSampleError>(())
 /// ```
 #[inline]
@@ -135,15 +149,23 @@ where
 /// # Returns
 /// A tuple `(time_points, zcr_values)` where:
 /// - `time_points` are the center times of each window in seconds
-/// - `zcr_values` are the zero-crossing rates (counts per sample, typically 0.0-0.5)
+/// - `zcr_values` are the zero-crossing rates in crossings per second
 ///
 /// # Example
-/// ```rust,no_run
-/// use audio_samples::{AudioSamples, sample_rate, nzu};
+/// ```rust
 /// use audio_samples::operations::plotting::dsp_overlays;
+/// use audio_samples::{AudioSamples, nzu, sample_rate};
+/// use std::f64::consts::PI;
 ///
-/// let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(44100, 0.0f32), sample_rate!(44100))?;
+/// // One second of a 440 Hz sine at amplitude 0.8.
+/// let x = ndarray::Array1::from_shape_fn(44_100, |n| {
+///     0.8 * (2.0 * PI * 440.0 * n as f64 / 44_100.0).sin()
+/// });
+/// let audio = AudioSamples::new_mono(x, sample_rate!(44100))?;
 /// let (times, zcr) = dsp_overlays::compute_windowed_zcr(&audio, nzu!(2048), nzu!(512));
+/// // Two zero crossings per cycle: about 880 per second.
+/// assert_eq!(times.len(), zcr.len());
+/// assert!((zcr[0] - 880.0).abs() < 30.0);
 /// # Ok::<(), audio_samples::AudioSampleError>(())
 /// ```
 #[inline]
@@ -193,12 +215,19 @@ where
 /// - `energy_values` are the squared RMS values (power, typically 0.0-1.0 for normalised audio)
 ///
 /// # Example
-/// ```rust,no_run
-/// use audio_samples::{AudioSamples, sample_rate, nzu};
+/// ```rust
 /// use audio_samples::operations::plotting::dsp_overlays;
+/// use audio_samples::{AudioSamples, nzu, sample_rate};
+/// use std::f64::consts::PI;
 ///
-/// let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(44100, 0.0f32), sample_rate!(44100))?;
+/// // One second of a 440 Hz sine at amplitude 0.8.
+/// let x = ndarray::Array1::from_shape_fn(44_100, |n| {
+///     0.8 * (2.0 * PI * 440.0 * n as f64 / 44_100.0).sin()
+/// });
+/// let audio = AudioSamples::new_mono(x, sample_rate!(44100))?;
 /// let (times, energy) = dsp_overlays::compute_windowed_energy(&audio, nzu!(2048), nzu!(512));
+/// assert_eq!(times.len(), energy.len());
+/// assert!((energy[0] - 0.32).abs() < 0.01);
 /// # Ok::<(), audio_samples::AudioSampleError>(())
 /// ```
 #[inline]
@@ -257,14 +286,20 @@ where
 /// an error are skipped.
 ///
 /// # Example
-/// ```rust,no_run
-/// use audio_samples::{AudioSamples, sample_rate, nzu};
+/// ```rust
 /// use audio_samples::operations::plotting::dsp_overlays;
+/// use audio_samples::{AudioSamples, nzu, sample_rate};
+/// use std::f64::consts::PI;
 ///
-/// let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(44100, 0.0f32), sample_rate!(44100))?;
-/// let (times, centroids) = dsp_overlays::compute_windowed_spectral_centroid(
-///     &audio, nzu!(2048), nzu!(512)
-/// );
+/// // One second of a 440 Hz sine at amplitude 0.8.
+/// let x = ndarray::Array1::from_shape_fn(44_100, |n| {
+///     0.8 * (2.0 * PI * 440.0 * n as f64 / 44_100.0).sin()
+/// });
+/// let audio = AudioSamples::new_mono(x, sample_rate!(44100))?;
+/// let (times, centroids) =
+///     dsp_overlays::compute_windowed_spectral_centroid(&audio, nzu!(2048), nzu!(512));
+/// assert_eq!(times.len(), centroids.len());
+/// assert!((centroids[0] - 440.0).abs() < 50.0);
 /// # Ok::<(), audio_samples::AudioSampleError>(())
 /// ```
 #[inline]
@@ -326,14 +361,20 @@ where
 /// an error are skipped.
 ///
 /// # Example
-/// ```rust,no_run
-/// use audio_samples::{AudioSamples, sample_rate, nzu};
+/// ```rust
 /// use audio_samples::operations::plotting::dsp_overlays;
+/// use audio_samples::{AudioSamples, nzu, sample_rate};
+/// use std::f64::consts::PI;
 ///
-/// let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(44100, 0.0f32), sample_rate!(44100))?;
-/// let (times, rolloff) = dsp_overlays::compute_windowed_spectral_rolloff(
-///     &audio, nzu!(2048), nzu!(512), 0.85
-/// );
+/// // One second of a 440 Hz sine at amplitude 0.8.
+/// let x = ndarray::Array1::from_shape_fn(44_100, |n| {
+///     0.8 * (2.0 * PI * 440.0 * n as f64 / 44_100.0).sin()
+/// });
+/// let audio = AudioSamples::new_mono(x, sample_rate!(44100))?;
+/// let (times, rolloff) =
+///     dsp_overlays::compute_windowed_spectral_rolloff(&audio, nzu!(2048), nzu!(512), 0.85);
+/// assert_eq!(times.len(), rolloff.len());
+/// assert!((rolloff[0] - 440.0).abs() < 50.0);
 /// # Ok::<(), audio_samples::AudioSampleError>(())
 /// ```
 #[inline]

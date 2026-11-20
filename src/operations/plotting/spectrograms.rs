@@ -171,14 +171,15 @@ impl SpectrogramPlot {
     /// Self for method chaining.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust
     /// # use audio_samples::{AudioSamples, sample_rate};
     /// # use audio_samples::operations::traits::AudioPlotting;
-    /// # use audio_samples::operations::plotting::SpectrogramPlotParams;
+    /// # use audio_samples::operations::plotting::{PlotUtils, SpectrogramPlotParams};
     /// # let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(1000, 0.0f32), sample_rate!(44100)).unwrap();
     /// let plot = audio.plot_spectrogram(&SpectrogramPlotParams::default())?
     ///     .add_vline(1.5, Some("Event A"))
     ///     .add_vline(3.2, Some("Event B"));
+    /// assert!(plot.html()?.contains("Event B"));
     /// # Ok::<(), audio_samples::AudioSampleError>(())
     /// ```
     #[inline]
@@ -230,14 +231,15 @@ impl SpectrogramPlot {
     /// Self for method chaining.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust
     /// # use audio_samples::{AudioSamples, sample_rate};
     /// # use audio_samples::operations::traits::AudioPlotting;
-    /// # use audio_samples::operations::plotting::SpectrogramPlotParams;
+    /// # use audio_samples::operations::plotting::{PlotUtils, SpectrogramPlotParams};
     /// # let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(1000, 0.0f32), sample_rate!(44100)).unwrap();
     /// let plot = audio.plot_spectrogram(&SpectrogramPlotParams::default())?
     ///     .add_hline(440.0, Some("A4"))
     ///     .add_hline(880.0, Some("A5"));
+    /// assert!(plot.html()?.contains("A5"));
     /// # Ok::<(), audio_samples::AudioSampleError>(())
     /// ```
     #[inline]
@@ -294,15 +296,16 @@ impl SpectrogramPlot {
     /// Panics if `times` and `freqs` have different lengths.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust
     /// # use audio_samples::{AudioSamples, sample_rate};
     /// # use audio_samples::operations::traits::AudioPlotting;
-    /// # use audio_samples::operations::plotting::SpectrogramPlotParams;
+    /// # use audio_samples::operations::plotting::{PlotUtils, SpectrogramPlotParams};
     /// # let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(1000, 0.0f32), sample_rate!(44100)).unwrap();
     /// let times = vec![0.0, 0.5, 1.0, 1.5];
     /// let freqs = vec![220.0, 247.0, 262.0, 294.0]; // A3, B3, C4, D4
     /// let plot = audio.plot_spectrogram(&SpectrogramPlotParams::default())?
     ///     .overlay_contour(&times, &freqs, Some("Pitch Track"));
+    /// assert!(plot.html()?.contains("Pitch Track"));
     /// # Ok::<(), audio_samples::AudioSampleError>(())
     /// ```
     #[inline]
@@ -356,14 +359,20 @@ impl SpectrogramPlot {
     /// Self for method chaining.
     ///
     /// # Example
-    /// ```rust,ignore
-    /// use audio_samples::operations::plotting::dsp_overlays;
+    /// ```rust
+    /// use audio_samples::operations::plotting::{PlotUtils, SpectrogramPlotParams, dsp_overlays};
+    /// use audio_samples::operations::traits::AudioPlotting;
+    /// use audio_samples::{AudioSamples, nzu, sample_rate};
     ///
-    /// let (times, centroids) = dsp_overlays::compute_windowed_spectral_centroid(
-    ///     &audio, 2048, 512
-    /// );
-    /// let plot = audio.plot_spectrogram(&params)?
+    /// let x = ndarray::Array1::from_shape_fn(22_050, |n| (n as f64 * 0.06).sin());
+    /// let audio = AudioSamples::new_mono(x, sample_rate!(44100))?;
+    /// let (times, centroids) =
+    ///     dsp_overlays::compute_windowed_spectral_centroid(&audio, nzu!(2048), nzu!(512));
+    /// let plot = audio
+    ///     .plot_spectrogram(&SpectrogramPlotParams::default())?
     ///     .add_spectral_centroid(times, centroids, None);
+    /// assert!(plot.html()?.contains("Spectral Centroid"));
+    /// # Ok::<(), audio_samples::AudioSampleError>(())
     /// ```
     #[inline]
     #[must_use]
@@ -399,14 +408,20 @@ impl SpectrogramPlot {
     /// Self for method chaining.
     ///
     /// # Example
-    /// ```rust,ignore
-    /// use audio_samples::operations::plotting::dsp_overlays;
+    /// ```rust
+    /// use audio_samples::operations::plotting::{PlotUtils, SpectrogramPlotParams, dsp_overlays};
+    /// use audio_samples::operations::traits::AudioPlotting;
+    /// use audio_samples::{AudioSamples, nzu, sample_rate};
     ///
-    /// let (times, rolloff) = dsp_overlays::compute_windowed_spectral_rolloff(
-    ///     &audio, 2048, 512, 0.85
-    /// );
-    /// let plot = audio.plot_spectrogram(&params)?
+    /// let x = ndarray::Array1::from_shape_fn(22_050, |n| (n as f64 * 0.06).sin());
+    /// let audio = AudioSamples::new_mono(x, sample_rate!(44100))?;
+    /// let (times, rolloff) =
+    ///     dsp_overlays::compute_windowed_spectral_rolloff(&audio, nzu!(2048), nzu!(512), 0.85);
+    /// let plot = audio
+    ///     .plot_spectrogram(&SpectrogramPlotParams::default())?
     ///     .add_spectral_rolloff(times, rolloff, None);
+    /// assert!(plot.html()?.contains("Spectral Rolloff"));
+    /// # Ok::<(), audio_samples::AudioSampleError>(())
     /// ```
     #[inline]
     #[must_use]
@@ -603,9 +618,10 @@ impl SpectrogramPlotParams {
     /// A [`SpectrogramPlotParams`] instance configured for mel-dB visualisation.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust
     /// # use audio_samples::operations::plotting::SpectrogramPlotParams;
     /// let params = SpectrogramPlotParams::mel_db();
+    /// assert_eq!(params.colorbar_label.as_deref(), Some("Amplitude (dB)"));
     /// ```
     #[cfg(feature = "transforms")]
     #[inline]
@@ -658,9 +674,10 @@ impl SpectrogramPlotParams {
     /// A [`SpectrogramPlotParams`] instance configured for linear magnitude visualisation.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust
     /// # use audio_samples::operations::plotting::SpectrogramPlotParams;
     /// let params = SpectrogramPlotParams::linear_magnitude();
+    /// assert_eq!(params.colorbar_label.as_deref(), Some("Magnitude"));
     /// ```
     #[cfg(feature = "transforms")]
     #[inline]
@@ -743,15 +760,18 @@ impl Default for SpectrogramPlotParams {
 ///   [`MAX_SEPARATE_CHANNELS`](super::MAX_SEPARATE_CHANNELS) channels.
 ///
 /// # Example
-/// ```rust,no_run
+/// ```rust
 /// use audio_samples::{AudioSamples, sample_rate};
 /// use audio_samples::operations::plotting::{create_spectrogram_plot, SpectrogramPlotParams, PlotUtils};
 ///
 /// let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(44100, 0.0f32), sample_rate!(44100))?;
 /// let params = SpectrogramPlotParams::mel_db();
 /// let plot = create_spectrogram_plot(&audio, &params)?;
-/// plot.save("spectrogram.html")?;
-/// # Ok::<(), audio_samples::AudioSampleError>(())
+/// let path = std::env::temp_dir().join("audio_samples_doc_mel_spectrogram.html");
+/// plot.save(&path)?;
+/// assert!(path.exists());
+/// std::fs::remove_file(&path)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[cfg(feature = "transforms")]
 #[inline]

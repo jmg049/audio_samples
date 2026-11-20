@@ -112,10 +112,12 @@ impl CompositePlot {
     /// An empty [`CompositePlot`] instance. Use [`add_plot`](Self::add_plot) to add visualisations.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust
     /// use audio_samples::operations::plotting::CompositePlot;
     ///
     /// let composite = CompositePlot::new();
+    /// // An empty composite cannot be built.
+    /// assert!(composite.build().is_err());
     /// ```
     #[inline]
     #[must_use]
@@ -139,7 +141,7 @@ impl CompositePlot {
     /// Self for method chaining.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust
     /// # use audio_samples::{AudioSamples, sample_rate};
     /// # use audio_samples::operations::traits::AudioPlotting;
     /// # use audio_samples::operations::plotting::{CompositePlot, WaveformPlotParams};
@@ -148,6 +150,7 @@ impl CompositePlot {
     /// let waveform = audio.plot_waveform(&WaveformPlotParams::default())?;
     /// let composite = CompositePlot::new()
     ///     .add_plot(waveform);
+    /// assert!(composite.build().is_ok());
     /// # Ok::<(), audio_samples::AudioSampleError>(())
     /// ```
     #[inline]
@@ -170,7 +173,7 @@ impl CompositePlot {
     /// Self for method chaining.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust
     /// use audio_samples::operations::plotting::{CompositePlot, CompositeLayout};
     ///
     /// let composite = CompositePlot::new()
@@ -195,7 +198,7 @@ impl CompositePlot {
     /// Returns [crate::AudioSampleError::Parameter] if no plots have been added.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust
     /// # use audio_samples::{AudioSamples, sample_rate};
     /// # use audio_samples::operations::traits::AudioPlotting;
     /// # use audio_samples::operations::plotting::{CompositePlot, WaveformPlotParams};
@@ -205,8 +208,11 @@ impl CompositePlot {
     /// let composite = CompositePlot::new()
     ///     .add_plot(waveform)
     ///     .build()?;
-    /// composite.save("composite.html")?;
-    /// # Ok::<(), audio_samples::AudioSampleError>(())
+    /// let path = std::env::temp_dir().join("audio_samples_doc_composite.html");
+    /// composite.save(&path)?;
+    /// assert!(path.exists());
+    /// std::fs::remove_file(&path)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     #[inline]
     pub fn build(self) -> AudioSampleResult<Self> {

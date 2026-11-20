@@ -66,9 +66,10 @@ impl MagnitudeSpectrumParams {
     /// A [`MagnitudeSpectrumParams`] instance configured for dB-scale visualisation.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust
     /// # use audio_samples::operations::plotting::MagnitudeSpectrumParams;
     /// let params = MagnitudeSpectrumParams::db();
+    /// assert!(params.db_scale);
     /// ```
     #[inline]
     #[must_use]
@@ -93,9 +94,10 @@ impl MagnitudeSpectrumParams {
     /// A [`MagnitudeSpectrumParams`] instance configured for linear-scale visualisation.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust
     /// # use audio_samples::operations::plotting::MagnitudeSpectrumParams;
     /// let params = MagnitudeSpectrumParams::linear();
+    /// assert!(!params.db_scale);
     /// ```
     #[inline]
     #[must_use]
@@ -275,15 +277,18 @@ impl PlotComponent for MagnitudeSpectrumPlot {
 /// - File I/O fails when saving the plot.
 ///
 /// # Example
-/// ```rust,no_run
+/// ```rust
 /// use audio_samples::{AudioSamples, sample_rate};
 /// use audio_samples::operations::plotting::{create_magnitude_spectrum_plot, MagnitudeSpectrumParams, PlotUtils};
 ///
 /// let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(4096, 0.0f32), sample_rate!(44100))?;
 /// let params = MagnitudeSpectrumParams::db();
 /// let plot = create_magnitude_spectrum_plot(&audio, &params)?;
-/// plot.save("spectrum.html")?;
-/// # Ok::<(), audio_samples::AudioSampleError>(())
+/// let path = std::env::temp_dir().join("audio_samples_doc_magnitude_spectrum.html");
+/// plot.save(&path)?;
+/// assert!(path.exists());
+/// std::fs::remove_file(&path)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[inline]
 pub fn create_magnitude_spectrum_plot<T>(

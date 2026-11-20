@@ -187,13 +187,14 @@ impl WaveformPlot {
     /// Self for method chaining.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust
     /// # use audio_samples::{AudioSamples, sample_rate};
     /// # use audio_samples::operations::traits::AudioPlotting;
-    /// # use audio_samples::operations::plotting::WaveformPlotParams;
+    /// # use audio_samples::operations::plotting::{PlotUtils, WaveformPlotParams};
     /// # let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(1000, 0.0f32), sample_rate!(44100)).unwrap();
     /// let plot = audio.plot_waveform(&WaveformPlotParams::default())?
     ///     .add_vline(1.5, Some("Event"), Some("red"));
+    /// assert!(plot.html()?.contains("Event"));
     /// # Ok::<(), audio_samples::AudioSampleError>(())
     /// ```
     #[inline]
@@ -242,13 +243,14 @@ impl WaveformPlot {
     /// Self for method chaining.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust
     /// # use audio_samples::{AudioSamples, sample_rate};
     /// # use audio_samples::operations::traits::AudioPlotting;
-    /// # use audio_samples::operations::plotting::WaveformPlotParams;
+    /// # use audio_samples::operations::plotting::{PlotUtils, WaveformPlotParams};
     /// # let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(1000, 0.0f32), sample_rate!(44100)).unwrap();
     /// let plot = audio.plot_waveform(&WaveformPlotParams::default())?
     ///     .add_hline(0.5, Some("Threshold"), Some("red"));
+    /// assert!(plot.html()?.contains("Threshold"));
     /// # Ok::<(), audio_samples::AudioSampleError>(())
     /// ```
     #[inline]
@@ -298,13 +300,14 @@ impl WaveformPlot {
     /// Self for method chaining.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust
     /// # use audio_samples::{AudioSamples, sample_rate};
     /// # use audio_samples::operations::traits::AudioPlotting;
-    /// # use audio_samples::operations::plotting::WaveformPlotParams;
+    /// # use audio_samples::operations::plotting::{PlotUtils, WaveformPlotParams};
     /// # let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(1000, 0.0f32), sample_rate!(44100)).unwrap();
     /// let plot = audio.plot_waveform(&WaveformPlotParams::default())?
     ///     .add_marker(1.0, 0.8, Some("Peak"), None);
+    /// assert!(plot.html()?.contains("Peak"));
     /// # Ok::<(), audio_samples::AudioSampleError>(())
     /// ```
     #[inline]
@@ -346,13 +349,14 @@ impl WaveformPlot {
     /// Self for method chaining.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust
     /// # use audio_samples::{AudioSamples, sample_rate};
     /// # use audio_samples::operations::traits::AudioPlotting;
-    /// # use audio_samples::operations::plotting::WaveformPlotParams;
+    /// # use audio_samples::operations::plotting::{PlotUtils, WaveformPlotParams};
     /// # let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(1000, 0.0f32), sample_rate!(44100)).unwrap();
     /// let plot = audio.plot_waveform(&WaveformPlotParams::default())?
     ///     .add_shaded_region(1.0, 2.0, Some("rgba(255,0,0,0.3)"), None);
+    /// assert!(plot.html()?.contains("rgba(255,0,0,0.3)"));
     /// # Ok::<(), audio_samples::AudioSampleError>(())
     /// ```
     #[inline]
@@ -405,15 +409,16 @@ impl WaveformPlot {
     /// Self for method chaining.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust
     /// use audio_samples::{AudioSamples, sample_rate, nzu};
     /// use audio_samples::operations::traits::AudioPlotting;
-    /// use audio_samples::operations::plotting::{WaveformPlotParams, dsp_overlays};
+    /// use audio_samples::operations::plotting::{PlotUtils, WaveformPlotParams, dsp_overlays};
     ///
     /// let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(44100, 0.0f32), sample_rate!(44100))?;
     /// let (times, rms) = dsp_overlays::compute_windowed_rms(&audio, nzu!(2048), nzu!(512));
     /// let plot = audio.plot_waveform(&WaveformPlotParams::default())?
     ///     .add_rms_envelope(times, rms, Some("red"), Some(2.0));
+    /// assert!(plot.html()?.contains("RMS Envelope"));
     /// # Ok::<(), audio_samples::AudioSampleError>(())
     /// ```
     #[inline]
@@ -461,15 +466,16 @@ impl WaveformPlot {
     /// Self for method chaining.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust
     /// use audio_samples::{AudioSamples, sample_rate, nzu};
     /// use audio_samples::operations::traits::AudioPlotting;
-    /// use audio_samples::operations::plotting::{WaveformPlotParams, dsp_overlays};
+    /// use audio_samples::operations::plotting::{PlotUtils, WaveformPlotParams, dsp_overlays};
     ///
     /// let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(44100, 0.0f32), sample_rate!(44100))?;
     /// let (times, peaks) = dsp_overlays::compute_windowed_peak(&audio, nzu!(2048), nzu!(512));
     /// let plot = audio.plot_waveform(&WaveformPlotParams::default())?
     ///     .add_peak_envelope(times, peaks, Some("orange"), Some(2.0));
+    /// assert!(plot.html()?.contains("Peak Envelope"));
     /// # Ok::<(), audio_samples::AudioSampleError>(())
     /// ```
     #[inline]
@@ -521,15 +527,16 @@ impl WaveformPlot {
     /// Self for method chaining.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust
     /// use audio_samples::{AudioSamples, sample_rate, nzu};
     /// use audio_samples::operations::traits::AudioPlotting;
-    /// use audio_samples::operations::plotting::{WaveformPlotParams, dsp_overlays};
+    /// use audio_samples::operations::plotting::{PlotUtils, WaveformPlotParams, dsp_overlays};
     ///
     /// let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(44100, 0.0f32), sample_rate!(44100))?;
     /// let (times, zcr) = dsp_overlays::compute_windowed_zcr(&audio, nzu!(2048), nzu!(512));
     /// let plot = audio.plot_waveform(&WaveformPlotParams::default())?
     ///     .add_zcr_overlay(times, zcr, Some("blue"), Some(2.0));
+    /// assert!(plot.html()?.contains("Zero-Crossing Rate"));
     /// # Ok::<(), audio_samples::AudioSampleError>(())
     /// ```
     #[inline]
@@ -591,15 +598,16 @@ impl WaveformPlot {
     /// Self for method chaining.
     ///
     /// # Example
-    /// ```rust,no_run
+    /// ```rust
     /// use audio_samples::{AudioSamples, sample_rate, nzu};
     /// use audio_samples::operations::traits::AudioPlotting;
-    /// use audio_samples::operations::plotting::{WaveformPlotParams, dsp_overlays};
+    /// use audio_samples::operations::plotting::{PlotUtils, WaveformPlotParams, dsp_overlays};
     ///
     /// let audio = AudioSamples::new_mono(ndarray::Array1::from_elem(44100, 0.0f32), sample_rate!(44100))?;
     /// let (times, energy) = dsp_overlays::compute_windowed_energy(&audio, nzu!(2048), nzu!(512));
     /// let plot = audio.plot_waveform(&WaveformPlotParams::default())?
     ///     .add_energy_overlay(times, energy, Some("green"), Some(2.0));
+    /// assert!(plot.html()?.contains("\"Energy\""));
     /// # Ok::<(), audio_samples::AudioSampleError>(())
     /// ```
     #[inline]
@@ -655,13 +663,24 @@ impl WaveformPlot {
     /// Self for method chaining.
     ///
     /// # Example
-    /// ```rust,ignore
-    /// use audio_samples::operations::AudioOnsetDetection;
+    /// ```rust
     /// use audio_samples::operations::onset::OnsetDetectionConfig;
+    /// use audio_samples::operations::plotting::{PlotUtils, WaveformPlotParams};
+    /// use audio_samples::operations::traits::{AudioOnsetDetection, AudioPlotting};
+    /// use audio_samples::{AudioSamples, sample_rate};
     ///
-    /// let onsets = audio.detect_onsets(&OnsetDetectionConfig::percussive(audio.sample_rate()))?;
-    /// let plot = audio.plot_waveform(&WaveformPlotParams::default())?
-    ///     .add_onset_markers(onsets, Some("red"), false);
+    /// // Two seconds of clicks every half second.
+    /// let x: Vec<f64> = (0..88_200)
+    ///     .map(|i| if i % 22_050 < 64 { 0.9 } else { 0.0 })
+    ///     .collect();
+    /// let audio = AudioSamples::new_mono(ndarray::Array1::from_vec(x), sample_rate!(44100))?;
+    /// let onsets = audio.detect_onsets(&OnsetDetectionConfig::default())?;
+    /// assert!(!onsets.is_empty());
+    /// let plot = audio
+    ///     .plot_waveform(&WaveformPlotParams::default())?
+    ///     .add_onset_markers(onsets, Some("red"), true);
+    /// assert!(plot.html()?.contains("<html"));
+    /// # Ok::<(), audio_samples::AudioSampleError>(())
     /// ```
     #[inline]
     #[must_use]
@@ -702,13 +721,26 @@ impl WaveformPlot {
     /// Self for method chaining.
     ///
     /// # Example
-    /// ```rust,ignore
-    /// use audio_samples::operations::AudioBeatTracking;
+    /// ```rust
     /// use audio_samples::operations::beat::BeatTrackingConfig;
+    /// use audio_samples::operations::onset::OnsetDetectionConfig;
+    /// use audio_samples::operations::plotting::{PlotUtils, WaveformPlotParams};
+    /// use audio_samples::operations::traits::{AudioBeatTracking, AudioPlotting};
+    /// use audio_samples::{AudioSamples, sample_rate};
     ///
-    /// let beats = audio.detect_beats(&BeatTrackingConfig::default())?;
-    /// let plot = audio.plot_waveform(&WaveformPlotParams::default())?
+    /// // Two seconds of clicks every half second (120 BPM).
+    /// let x: Vec<f64> = (0..88_200)
+    ///     .map(|i| if i % 22_050 < 64 { 0.9 } else { 0.0 })
+    ///     .collect();
+    /// let audio = AudioSamples::new_mono(ndarray::Array1::from_vec(x), sample_rate!(44100))?;
+    /// let config = BeatTrackingConfig::new(120.0, None, OnsetDetectionConfig::default());
+    /// let beats = audio.detect_beats(&config)?;
+    /// assert!(!beats.beat_times.is_empty());
+    /// let plot = audio
+    ///     .plot_waveform(&WaveformPlotParams::default())?
     ///     .add_beat_markers(beats.beat_times, Some("blue"), true);
+    /// assert!(plot.html()?.contains("<html"));
+    /// # Ok::<(), audio_samples::AudioSampleError>(())
     /// ```
     #[inline]
     #[must_use]
