@@ -23,7 +23,9 @@ Only *increases* count, so note offsets do not create onsets. This crate
 evaluates it on a constant-Q transform (CQT) whose $b_o O$ bins ($b_o$ per
 octave, $O$ octaves) start at $f_{min}$ Hz, with an analysis window of
 $N_w = \lfloor 4 f_s / f_{min} \rfloor$ samples (four periods of the lowest
-bin). The magnitudes are **not** squared, despite the method's name ("energy").
+bin). The quality factor is $Q = 1/(2^{1/b_o} - 1)$ (34.1 at $b_o = 24$): bin
+$b$'s kernel spans $Q$ periods of its centre frequency, $Q f_s / f_b$
+samples, cut to $N_w$ and centred in the frame. The magnitudes are **not** squared, despite the method's name ("energy").
 Optionally, values below $\mu$ times a running median of $L_{med}$ frames are set to
 zero (`adaptive_threshold`, $\mu$ = `adaptive_threshold_multiplier`).
 
@@ -91,19 +93,23 @@ assert!(pp.pre_emphasis && pp.pre_emphasis_coeff == 0.97 && !pp.median_filter);
 let onsets = audio.detect_onsets(&config).unwrap();
 println!("{onsets:.4?}");
 assert_eq!(onsets.len(), 4);
-// Peaks fall on frames 19, 62, 105, 148: 43 frames apart (0.4992 s, not 0.5 s).
+// Peaks fall on frames 21, 64, 107, 150: 43 frames apart (0.4992 s, not 0.5 s).
 let frames: Vec<f64> = onsets.iter().map(|t| (t * 44_100.0 / 512.0).round()).collect();
-assert_eq!(frames, vec![19.0, 62.0, 105.0, 148.0]);
-// Reported times precede the bursts by 29 to 32 ms: the 72.7 ms window
-// centred on frame t already contains a burst that starts after its centre.
+assert_eq!(frames, vec![21.0, 64.0, 107.0, 150.0]);
+// Each peak is the last frame whose centre precedes its burst, 6.2 to 8.5 ms
+// before it (less than one hop, 11.6 ms).
 for (k, t) in onsets.iter().enumerate() {
     let lead = 0.25 + 0.5 * k as f64 - t;
-    assert!(lead > 0.029 && lead < 0.032, "lead {lead}");
+    assert!(lead > 0.006 && lead < 0.0086, "lead {lead}");
 }
 ```
 
-The lead grows by 0.77 ms per burst because onset times are quantised to
-whole frames: 0.5 s is 43.07 frames, and the detector can only report 43.
+The largest increase comes in the last frame before each burst: the long
+low-bin kernels (the 72.7 ms window) already respond to a burst that starts
+after their centre, and they gain more from the frame before the burst to
+that frame than from it to the next. The lead grows by 0.77 ms per burst
+because onset times are quantised to whole frames: 0.5 s is 43.07 frames, and
+the detector can only report 43.
 
 <!-- figure: ch13-onsets -->
 
@@ -114,10 +120,10 @@ maximum, and thresholds with a 9-frame window (104.5 ms), $\delta = 0.07$ and a
 floor $\theta_{lo} = 0.1$; peaks closer than 3 frames (34.8 ms) are merged.
 
 The floor removes weak onsets. After normalisation, no peak weaker than a
-tenth of the strongest one in the clip is reported. On the lab's
-eight-burst track the defaults find only 5 onsets: the first three bursts
-peak at 0.030, 0.025 and 0.087 of the strongest (the CQT response varies from
-click to click; see below). Lowering `adaptive_threshold.min_threshold` to
+tenth of the strongest one in the clip is reported. The lab's eight-burst
+track has three quiet bursts (the first three, 26 dB below the others), and
+the defaults find only 5 onsets: the quiet bursts peak at 0.020, 0.034 and
+0.024 of the largest value. Lowering `adaptive_threshold.min_threshold` to
 0.01 finds all 8.
 
 Lengths chosen as if they counted audio samples are far too large in frames.
@@ -125,7 +131,7 @@ Starting from the configuration with the 0.01 floor (the lab, on 8 bursts) and
 switching on one such setting at a time (a median filter of length 3, a
 threshold window of 1024, a separation of 512) shows the effect of each: the
 length-3 median deletes every one-frame peak (0 onsets); a 1024-frame threshold window, clipped to the signal length,
-makes the threshold the global maximum minus $\delta$ (1 onset); a 512-frame
+makes the threshold the global maximum minus $\delta$ (3 onsets); a 512-frame
 separation, reduced to a quarter of the signal (91 frames, 1.06 s), keeps only
 3. Switching pre-emphasis off changes nothing on this signal (8). The threshold,
 the minimum spacing and the pre-emphasis all live in `peak_picking`;
@@ -217,15 +223,17 @@ let ours: Vec<f64> = peaks.iter().map(|&i| i as f64 * 512.0 / fs).collect();
 assert_eq!(ours, audio.detect_onsets(&config).unwrap());
 ```
 
-The lab also prints the ODF peak heights for eight identical bursts: 0.3, 0.3,
-1.0, 2.0, 3.3, 3.6, 11.5 and 10.4. The constant-Q transform of the external
-`spectrograms` crate responds very differently to identical clicks (a factor
-of 40 here; the onset module documents this limitation), which is why a
-*local* threshold window matters.
+The lab also prints the ODF peak heights of its five loud bursts: 1.94, 4.41,
+4.62, 5.82 and 5.15, a factor of 3 for bursts of the same amplitude. Each burst
+is a different noise sample and falls at a different place relative to the
+frame grid, and the highest bins' kernels are shorter than a hop, so they see
+only part of the time between frames (the onset module documents this). A
+*local* threshold window copes with such differences.
 
 **Tempo.** [`onset_strength_envelope`](crate::operations::beat::onset_strength_envelope)
 is public, so the autocorrelation and the prior can be written out and
-compared with `estimate_tempo`. First at 120 BPM, then at 80 BPM.
+compared with `estimate_tempo`: at 120 BPM, at 80 BPM, and at 80 BPM with
+quiet off-beats (every other click at a fifth of the amplitude).
 
 ```rust
 use audio_samples::operations::AudioBeatTracking;
@@ -235,18 +243,21 @@ use audio_samples::{AudioSamples, sample_rate};
 use ndarray::Array1;
 
 let (sr, fs, hop) = (44_100usize, 44_100.0, 512.0);
-let clicks = |bpm: f64, seconds: f64| {
+// Clicks every 60/bpm s from 0.1 s; every other click at `off` times 0.9.
+let clicks = |bpm: f64, off: f64, seconds: f64| {
     let mut x = vec![0.0f64; (seconds * fs) as usize];
     let mut seed = 0x2545_F491_4F6C_DD1Du64;
-    let mut t = 0.1;
+    let (mut t, mut k) = (0.1, 0);
     while t < seconds - 0.1 {
         let start = (t * sr as f64) as usize;
+        let amp = if k % 2 == 0 { 0.9 } else { 0.9 * off };
         for i in 0..256 {
             seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17;
             let r = (seed >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0;
-            x[start + i] = 0.9 * (-(i as f64) / 24.0).exp() * r;
+            x[start + i] = amp * (-(i as f64) / 24.0).exp() * r;
         }
         t += 60.0 / bpm;
+        k += 1;
     }
     AudioSamples::new_mono(Array1::from(x), sample_rate!(44100)).unwrap()
 };
@@ -272,32 +283,35 @@ let tempo = |env: &[f64]| -> (f64, usize) {
 };
 
 let config = BeatTrackingConfig::new(120.0, None, OnsetDetectionConfig::default());
-for (bpm, expected_lag) in [(120.0, 43), (80.0, 129)] {
-    let audio = clicks(bpm, 8.5);
+for (bpm, off, expected_lag) in [(120.0, 1.0, 43), (80.0, 1.0, 65), (80.0, 0.2, 129)] {
+    let audio = clicks(bpm, off, 8.5);
     let lib = audio.estimate_tempo(&config).unwrap();
     let env = onset_strength_envelope(&audio, &config.onset_config, None).unwrap();
     let (ours, lag) = tempo(&env);
-    println!("{bpm} BPM clicks: estimate {lib:.2} BPM (lag {lag} frames)");
+    println!("{bpm} BPM clicks (off-beats x{off}): estimate {lib:.2} BPM (lag {lag} frames)");
     assert!((ours - lib).abs() < 1e-9);
     assert_eq!(lag, expected_lag);
 }
 // 120 BPM -> lag 43 -> 120.19 BPM (the nearest grid point).
-// 80 BPM  -> lag 129 -> 40.06 BPM: half the tempo.
+// 80 BPM  -> lag 65 -> 79.51 BPM.
+// 80 BPM with quiet off-beats -> lag 129 -> 40.06 BPM: half the tempo.
 assert!((60.0 * fs / (hop * 43.0) - 120.19).abs() < 0.005);
+assert!((60.0 * fs / (hop * 65.0) - 79.51).abs() < 0.005);
 assert!((60.0 * fs / (hop * 129.0) - 40.06).abs() < 0.005);
 ```
 
 <!-- figure: ch13-tempo -->
 
-The halving comes from the ODF. The lab (a ten-click track, slightly different
-from the twelve-click track above) prints the ODF at each of its 80 BPM clicks:
-0.88, 0.0, 2.6, 0.08, 13.42, 0.71, 0.0, 3.27, 0.03, 8.69. Every other click is
-close to zero (the CQT response variation again), so the envelope repeats
-every *two* beats: its autocorrelation at lag 129 (0.00240) is twenty times
-that at lag 65 (0.00012), a larger ratio than the prior weights (0.29 against
-0.84) can reverse. At 174 BPM the lab finds 58.07 BPM, a third of the tempo (lag 89,
-almost exactly $3 \times 29.7$). The estimate is correct at 60, 100, 120 and
-140 BPM (60.09, 99.38, 120.19, 139.67).
+The halving comes from the signal. The lab (a ten-click track, slightly
+different from the twelve-click track above) prints the ODF at each of its
+80 BPM clicks with quiet off-beats: 3.83, 1.32, 3.61, 0.49, 5.77, 0.38, 5.9,
+0.79, 2.82, 0.73. The envelope repeats every *two* beats, so its
+autocorrelation at lag 129 (0.00607) is 3.35 times that at lag 65 (0.00181), a
+larger ratio than the prior weights (0.29 against 0.84) can reverse. A
+listener might well hear the accented clicks as the beat; the estimator
+cannot tell which level is meant. With clicks of equal amplitude the lab's
+estimates are correct, to the grid, at 60, 80, 100, 120, 140 and 174 BPM
+(60.09, 79.51, 99.38, 120.19, 139.67 and 172.27).
 
 ## Ask the library to explain
 
@@ -384,9 +398,9 @@ assert!((fine - 1.38).abs() < 0.005);
   (pre-emphasised) peak is under a tenth of the clip's strongest is not
   reported. Lower `adaptive_threshold.min_threshold` for material with a wide
   dynamic range, and check the result with `explain_with`.
-- **Reported times are frame centres** and lead the true onset by up to half
-  the CQT window (about 30 ms at the default 55 Hz lower edge), and are
-  quantised to $H/f_s$.
+- **Reported times are frame centres**, quantised to $H/f_s$; on clean clicks
+  the peak usually falls in the last frame before the onset, so the reported
+  time is early by less than one hop.
 - **"Energy" flux is magnitude flux** here: magnitudes are not squared.
 - **Octave errors in tempo** are expected, not exceptional: check the
   estimate against $2\times$ and $\tfrac{1}{2}\times$ (and $3\times$) before

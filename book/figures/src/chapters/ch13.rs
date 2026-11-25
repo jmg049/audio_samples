@@ -17,14 +17,14 @@ fn main() -> Result {
     figs.finish()
 }
 
-/// The chapter's decaying noise burst (xorshift noise, 256 samples).
-fn burst(x: &mut [f64], start: usize, seed: &mut u64) {
+/// The chapter's decaying noise burst (xorshift noise, 256 samples), peak amplitude `amp`.
+fn burst(x: &mut [f64], start: usize, amp: f64, seed: &mut u64) {
     for i in 0..256 {
         *seed ^= *seed << 13;
         *seed ^= *seed >> 7;
         *seed ^= *seed << 17;
         let r = (*seed >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0;
-        x[start + i] = 0.9 * (-(i as f64) / 24.0).exp() * r;
+        x[start + i] = amp * (-(i as f64) / 24.0).exp() * r;
     }
 }
 
@@ -35,7 +35,7 @@ fn four_bursts() -> Result<AudioSamples<'static, f64>> {
     let mut seed = 0x2545_F491_4F6C_DD1Du64;
     for k in 0..4 {
         let start = ((0.25 + 0.5 * k as f64) * sr as f64) as usize;
-        burst(&mut x, start, &mut seed);
+        burst(&mut x, start, 0.9, &mut seed);
     }
     Ok(AudioSamples::new_mono(
         Array1::from(x),
@@ -43,14 +43,16 @@ fn four_bursts() -> Result<AudioSamples<'static, f64>> {
     )?)
 }
 
-/// The click track of the tempo example.
-fn clicks(bpm: f64, seconds: f64) -> Result<AudioSamples<'static, f64>> {
+/// The click track of the tempo example: every other click at `off` times 0.9.
+fn clicks(bpm: f64, off: f64, seconds: f64) -> Result<AudioSamples<'static, f64>> {
     let mut x = vec![0.0f64; (seconds * FS) as usize];
     let mut seed = 0x2545_F491_4F6C_DD1Du64;
-    let mut t = 0.1;
+    let (mut t, mut k) = (0.1, 0);
     while t < seconds - 0.1 {
-        burst(&mut x, (t * FS) as usize, &mut seed);
+        let amp = if k % 2 == 0 { 0.9 } else { 0.9 * off };
+        burst(&mut x, (t * FS) as usize, amp, &mut seed);
         t += 60.0 / bpm;
+        k += 1;
     }
     Ok(AudioSamples::new_mono(
         Array1::from(x),
@@ -81,14 +83,14 @@ fn onsets(figs: &mut Figures) -> Result {
     let detected = audio.detect_onsets(&config)?;
     let frames: Vec<f64> = detected.iter().map(|t| (t * FS / HOP).round()).collect();
     check(
-        "onset frames 19, 62, 105, 148",
-        frames == vec![19.0, 62.0, 105.0, 148.0],
+        "onset frames 21, 64, 107, 150",
+        frames == vec![21.0, 64.0, 107.0, 150.0],
     );
     for (k, t) in detected.iter().enumerate() {
         let lead = 0.25 + 0.5 * k as f64 - t;
         check(
-            format!("lead {lead} in 29..32 ms"),
-            lead > 0.029 && lead < 0.032,
+            format!("lead {lead} in 6.0..8.6 ms"),
+            lead > 0.006 && lead < 0.0086,
         );
     }
 
@@ -161,8 +163,8 @@ fn onsets(figs: &mut Figures) -> Result {
         "ch13-onsets",
         "Top: the four-burst click track (bursts start at 0.25, 0.75, 1.25 and 1.75 s). \
          Bottom: the pre-emphasised, normalised onset detection function with the default \
-         threshold, and the four onsets detect_onsets reports at frames 19, 62, 105 and 148, \
-         about 30 ms before each burst.",
+         threshold, and the four onsets detect_onsets reports at frames 21, 64, 107 and 150, \
+         6 to 9 ms before each burst.",
         (720, 560),
         |area| {
             let panels = rows(area, 2);
@@ -201,13 +203,13 @@ fn onsets(figs: &mut Figures) -> Result {
 }
 
 /// Autocorrelation of the onset strength envelope, the tempo prior and the
-/// chosen lag, at 120 and 80 BPM.
+/// chosen lag, at 120 BPM and at 80 BPM with quiet off-beats.
 fn tempo(figs: &mut Figures) -> Result {
     let frame_rate = FS / HOP;
     let config = BeatTrackingConfig::new(120.0, None, OnsetDetectionConfig::default());
     let mut curves = Vec::new();
-    for (bpm, expected_lag) in [(120.0, 43usize), (80.0, 129usize)] {
-        let audio = clicks(bpm, 8.5)?;
+    for (bpm, off, expected_lag) in [(120.0, 1.0, 43usize), (80.0, 0.2, 129usize)] {
+        let audio = clicks(bpm, off, 8.5)?;
         let lib = audio.estimate_tempo(&config)?;
         let env = onset_strength_envelope(&audio, &config.onset_config, None)?;
         let env: Vec<f64> = env.iter().copied().collect();
@@ -239,7 +241,7 @@ fn tempo(figs: &mut Figures) -> Result {
             format!("lag {} == {expected_lag}", best.1),
             best.1 == expected_lag,
         );
-        curves.push((bpm, lib, acf, score));
+        curves.push((bpm, off, lib, acf, score));
     }
     assert_close("lag 43 in BPM", 60.0 * FS / (HOP * 43.0), 120.19, 0.005);
     assert_close("lag 129 in BPM", 60.0 * FS / (HOP * 129.0), 40.06, 0.005);
@@ -255,18 +257,22 @@ fn tempo(figs: &mut Figures) -> Result {
         "ch13-tempo",
         "Autocorrelation of the onset strength envelope against tempo, and the same \
          weighted by the log-normal prior centred on 120 BPM (dashed); both curves are scaled to a maximum of 1. \
-         For 120 BPM clicks estimate_tempo picks lag 43 (120.19 BPM); for 80 BPM clicks it \
-         picks lag 129 (40.06 BPM), half the tempo.",
+         For 120 BPM clicks estimate_tempo picks lag 43 (120.19 BPM); for 80 BPM clicks whose \
+         off-beats have a fifth of the amplitude it picks lag 129 (40.06 BPM), half the tempo.",
         (720, 600),
         |area| {
             let panels = rows(area, 2);
-            for (p, (bpm, lib, acf, score)) in panels.iter().zip(&curves) {
+            for (p, (bpm, off, lib, acf, score)) in panels.iter().zip(&curves) {
                 let norm = |v: &[(f64, f64)]| -> Vec<(f64, f64)> {
                     let m = v.iter().fold(0.0f64, |m, p| m.max(p.1));
                     v.iter().map(|&(b, a)| (b, a / m)).collect()
                 };
                 Chart::new("Tempo (BPM)", "Scaled value", (38.0, 242.0), (-0.6, 1.1))
-                    .title(&format!("{bpm} BPM click track"))
+                    .title(&if *off < 1.0 {
+                        format!("{bpm} BPM click track, off-beats at {off} of the amplitude")
+                    } else {
+                        format!("{bpm} BPM click track")
+                    })
                     .add(Series::line("autocorrelation a(lag)", norm(acf), BLUE))
                     .add(Series::line("weighted by the prior", norm(score), VERMILION))
                     .add(Series::new("prior w (tempo)", prior.clone(), GREY, Style::Dashed(1)))

@@ -669,6 +669,29 @@ odd-length spectral bin spacing, `frequency_to_note` and
 - `AudioIirFiltering::frequency_response` is deprecated: it never had a filter
   to describe and always returned a flat response.
 - `PeakPickingConfig::default()` (used by `OnsetDetectionConfig::default()`, `ComplexOnsetConfig::default()` and `SpectralFluxConfig::complex()`) now uses a 9-frame delta threshold (delta 0.07) with an absolute floor of 0.1, a 3-frame minimum separation and no median filter. The old defaults (1024-frame threshold window, 3-point median filter, 512-frame separation) found about 10% of onsets; `detect_onsets` with the default config now finds all 10 notes of a test sequence (was 1).
+- **The energy onset detectors use a constant-Q CQT.** `OnsetDetectionConfig::default()`,
+  `OnsetDetectionConfig::speech()` and `SpectralFluxConfig::musical()` use the new
+  `onset::onset_cqt_params()`: `CqtParams::onset_detection()` with the constant Q of its bin
+  spacing, `1/(2^(1/24) − 1) ≈ 34.1`, instead of 0.5. `OnsetDetectionConfig::musical()` uses
+  `CqtParams::musical()` with Q 16.8 instead of 1.0. At Q 0.5 a kernel was half a period of its
+  centre frequency long, so its magnitude depended on the phase of the signal: a decaying tone
+  gave a fluctuating detection function with extra peaks, and the detection-function peaks of
+  similar clicks differed by a factor of 100 or more (now about 3). With the kernels centred in
+  the frame (`spectrograms` 2.2.0) the default configuration reports clean onsets within one hop
+  (11.6 ms at 44.1 kHz), mostly in the frame just before the onset; they were reported about
+  30 ms early.
+- `OnsetDetectionConfig::percussive` zeroes the detection function below twice a 5-frame
+  running median (was 3 frames). Over 3 frames that removed every hit whose peak is split
+  between two adjacent frames; on an eight-click track it found 5 to 7 clicks, now all 8.
+- `SpectralFluxConfig::percussive` compresses the flux with `ln(1 + 10·x)` (was 1000). With the
+  kernels centred, the low bins start to respond about a quarter of the analysis window before
+  a hit, and strong compression made that early rise a peak of its own, so every hit was
+  reported twice.
+- `complex_onset_detection` and `detect_onsets_spectral_flux` with
+  `SpectralFluxMethod::Complex` or `RectifiedComplex` report the time each
+  `constant_q_transform` frame describes, `(i·H + N/2)/f_s` with `N = min(signal_len, 16384)`
+  (they reported `i·H/f_s`, about 0.19 s early for any signal of 16384 samples or more at
+  44.1 kHz).
 - `note_to_midi` (and so `note_to_frequency`) accepts a wider note grammar: lowercase letters, any run of `#` `♯` `b` `!` `♭` `𝄪` `𝄫` `♮` accidentals (B#3 = 60, Cb4 = 59, double accidentals), signed octaves (`C-1` = 0) and a cents suffix rounded half to even (`A4+50` = 70). The octave remains required and the result remains a `u8` in `0..=127`.
 - `BeatTrackingData::beat_times` / `track_beats_core` are now sorted chronologically and de-duplicated (they were in detection order). `BeatTrackingData::tempo_bpm` is documented as the requested tempo (it is not estimated); its `Display` prints "Tempo:".
 - `resampling` feature: Medium/High/Fast downsampling take 2-3x longer than before for the same ratio, because their anti-aliasing filters are longer and now correct.
@@ -702,6 +725,13 @@ odd-length spectral bin spacing, `frequency_to_note` and
 - A mel spectrogram's `frequencies()` axis ignores `f_min`/`f_max`; it is
   correct only for the range 0 Hz to Nyquist. This is inherited from the
   `spectrograms` crate (2.2.0).
+- The complex-domain onset detection function (`onset_detection_function_complex`,
+  `complex_onset_detection`) weights the phase deviation of every CQT bin equally, however
+  quiet. In silence every bin deviates by its full expected phase advance, so on sparse
+  material such as a click track the phase term dominates: the function is nearly constant
+  and dips at the onsets. Its frames are also `min(signal_len, 16384)` samples long whatever
+  `ComplexOnsetConfig::window_size` says. Use `detect_onsets` or
+  `AudioRhythm::onset_detect` for such material.
 
 ## 2.0.0
 

@@ -5,10 +5,10 @@
 //!
 //! What it does:
 //!
-//! 1. Builds a click track (decaying noise bursts every 0.5 s) and runs
-//!    `detect_onsets` with the default configuration (five of the eight
-//!    bursts: the 0.1 threshold floor drops the three weakest) and with the
-//!    floor lowered to 0.01 (all eight).
+//! 1. Builds a click track (decaying noise bursts every 0.5 s, the first three
+//!    26 dB quieter than the rest) and runs `detect_onsets` with the default
+//!    configuration (five of the eight bursts: the 0.1 threshold floor drops
+//!    the three quiet ones) and with the floor lowered to 0.01 (all eight).
 //! 2. Switches on, one at a time, peak-picking lengths sized as if they
 //!    counted audio samples rather than frames, to show which setting loses
 //!    which onsets.
@@ -16,8 +16,8 @@
 //!    peak picking from its definition, and converts frames to seconds.
 //! 4. Estimates tempo for click tracks at several tempi, re-derives
 //!    `estimate_tempo` (autocorrelation of the onset envelope with a
-//!    log-normal prior) and shows the metrical-level errors at 80 BPM
-//!    (half the tempo, an octave) and 174 BPM (a third of the tempo).
+//!    log-normal prior) and shows a metrical-level error: at 80 BPM with
+//!    quiet off-beats the estimate is half the tempo (an octave).
 //! 5. Prints the explanation of the default `OnsetDetectionConfig`.
 //!
 //! Run with:
@@ -39,11 +39,12 @@ use spectrograms::{SpectrogramParams, StftParams};
 const SR: f64 = 44_100.0;
 const HOP: f64 = 512.0;
 
-/// Exponentially decaying noise bursts ("clicks") starting at `times` (s).
-fn click_track(times: &[f64], seconds: f64) -> AudioSamples<'static, f64> {
+/// Exponentially decaying noise bursts ("clicks") starting at `times` (s), with
+/// peak amplitudes `amps`.
+fn click_track(times: &[f64], amps: &[f64], seconds: f64) -> AudioSamples<'static, f64> {
     let mut x = vec![0.0f64; (seconds * SR) as usize];
     let mut seed = 0x2545_F491_4F6C_DD1Du64;
-    for &t in times {
+    for (&t, &amp) in times.iter().zip(amps) {
         let start = (t * SR) as usize;
         for i in 0..256 {
             seed ^= seed << 13;
@@ -51,7 +52,7 @@ fn click_track(times: &[f64], seconds: f64) -> AudioSamples<'static, f64> {
             seed ^= seed << 17;
             let r = (seed >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0;
             if start + i < x.len() {
-                x[start + i] = 0.9 * (-(i as f64) / 24.0).exp() * r;
+                x[start + i] = amp * (-(i as f64) / 24.0).exp() * r;
             }
         }
     }
@@ -148,36 +149,43 @@ fn main() {
 
     // ------------------------------------------------------------ 1. Onsets
     let truth: Vec<f64> = (0..8).map(|k| 0.25 + 0.5 * f64::from(k)).collect();
-    let audio = click_track(&truth, 4.25);
-    println!("1. Click track: 8 noise bursts at 0.25, 0.75, ..., 3.75 s (44.1 kHz)");
+    // The first three bursts are 0.045 instead of 0.9: 26 dB quieter.
+    let amps = [0.045, 0.045, 0.045, 0.9, 0.9, 0.9, 0.9, 0.9];
+    assert!((20.0 * (0.045f64 / 0.9).log10() + 26.02).abs() < 0.005);
+    let audio = click_track(&truth, &amps, 4.25);
+    println!(
+        "1. Click track: 8 noise bursts at 0.25, 0.75, ..., 3.75 s (44.1 kHz), the first three 26 dB quieter"
+    );
     let default_onsets = audio
         .detect_onsets(&OnsetDetectionConfig::default())
         .expect("detect");
     println!("   default configuration: {} onsets", default_onsets.len());
-    // The three weakest bursts (the first three) fall below the 0.1 floor;
-    // bursts 4 to 8 are found, each 29-35 ms early (see below).
+    // The three quiet bursts fall below the 0.1 floor; bursts 4 to 8 are found.
     assert_eq!(default_onsets.len(), 5);
     for (t, want) in default_onsets.iter().zip(&truth[3..]) {
-        assert!((t - want) < 0.0 && (t - want) > -0.035);
+        assert!((t - want).abs() < HOP / SR);
     }
     let onsets = audio.detect_onsets(&sensitive()).expect("detect");
     println!("   threshold floor 0.01:  {} onsets", onsets.len());
     assert_eq!(onsets.len(), 8);
-    for (t, want) in onsets.iter().zip(&truth) {
-        println!(
-            "     {t:.4} s (true {want:.2} s, {:+.1} ms)",
-            1000.0 * (t - want)
-        );
-        // Frame centres: the 72.7 ms window contains the burst before the
-        // frame centre reaches it, so the reported time is early.
-        assert!((t - want) < 0.0 && (t - want) > -0.035);
+    let errors_ms: Vec<f64> = onsets
+        .iter()
+        .zip(&truth)
+        .map(|(t, want)| (10_000.0 * (t - want)).round() / 10.0)
+        .collect();
+    for (t, (want, e)) in onsets.iter().zip(truth.iter().zip(&errors_ms)) {
+        println!("     {t:.4} s (true {want:.2} s, {e:+.1} ms)");
     }
-    // 0.5 s is 43.07 frames; frames are 43 apart, so the lead grows by 0.77 ms per burst.
+    // Every reported time is a frame centre within one hop (11.61 ms) of its burst.
+    assert!(errors_ms.iter().all(|e| e.abs() < 1000.0 * HOP / SR));
+    assert_eq!(
+        errors_ms,
+        vec![-6.2, -7.0, -7.7, -8.5, -9.3, 1.6, -10.8, 0.0]
+    );
+    // 0.5 s is 43.07 frames; frames are 43 apart, so while the peak stays in the frame
+    // before a burst the lead grows by 0.77 ms per burst.
     assert!((0.5 * SR / HOP - 43.07).abs() < 0.005);
     assert!((1000.0 * (0.5 - 43.0 * HOP / SR) - 0.77).abs() < 0.005);
-    assert!((43.0 * HOP / SR - 0.4992).abs() < 5e-5);
-    let lead = 1000.0 * (onsets[0] - truth[0]);
-    assert!((lead + 29.4).abs() < 0.05);
     // The threshold's input: the pre-emphasised, normalised ODF at each burst.
     let (_, odf_default) = audio
         .onset_detection_function(&OnsetDetectionConfig::default())
@@ -187,7 +195,7 @@ fn main() {
         .iter()
         .map(|t| {
             let f = (t * SR / HOP).round() as usize;
-            (f - 6..=f).map(|i| seen[i]).fold(f64::MIN, f64::max)
+            (f - 2..=f + 1).map(|i| seen[i]).fold(f64::MIN, f64::max)
         })
         .collect();
     let rounded: Vec<f64> = burst_peaks
@@ -197,7 +205,7 @@ fn main() {
     println!("   normalised peaks per burst (the floor is 0.1): {rounded:?}");
     assert_eq!(
         rounded,
-        vec![0.030, 0.025, 0.087, 0.172, 0.288, 0.315, 1.0, 0.904]
+        vec![0.020, 0.034, 0.024, 0.338, 0.486, 0.613, 0.657, 0.599]
     );
     assert_eq!(burst_peaks.iter().filter(|&&h| h < 0.1).count(), 3);
 
@@ -213,7 +221,7 @@ fn main() {
         (
             "floor 0.01 + threshold window 1024 frames",
             |c| c.peak_picking.adaptive_threshold.window_size = 1024,
-            1,
+            3,
         ),
         (
             "floor 0.01 + min separation 512 frames",
@@ -270,7 +278,7 @@ fn main() {
         .iter()
         .map(|t| {
             let f = (t * SR / HOP).round() as usize;
-            (f - 6..=f)
+            (f - 2..=f + 1)
                 .max_by(|&a, &b| odf_raw[a].total_cmp(&odf_raw[b]))
                 .expect("frames")
         })
@@ -280,17 +288,26 @@ fn main() {
         "   ODF peak frames {peaks_at:?}, heights {:?}",
         heights
             .iter()
-            .map(|h| (h * 10.0).round() / 10.0)
+            .map(|h| (h * 100.0).round() / 100.0)
             .collect::<Vec<_>>()
     );
-    let spread = heights.iter().fold(0.0f64, |m, v| m.max(*v))
-        / heights.iter().fold(f64::INFINITY, |m, v| m.min(*v));
-    println!("   identical bursts, but the strongest ODF peak is {spread:.0} times the weakest");
-    assert!(spread > 10.0);
-    // Values quoted in the guide.
-    let rounded: Vec<f64> = heights.iter().map(|h| (h * 10.0).round() / 10.0).collect();
-    assert_eq!(rounded, vec![0.3, 0.3, 1.0, 2.0, 3.3, 3.6, 11.5, 10.4]);
-    assert_eq!(spread.round(), 40.0);
+    // The five loud bursts have the same amplitude but differ in their noise and
+    // in where they fall relative to the frame grid.
+    let loud = &heights[3..];
+    let spread = loud.iter().fold(0.0f64, |m, v| m.max(*v))
+        / loud.iter().fold(f64::INFINITY, |m, v| m.min(*v));
+    println!(
+        "   the strongest of the five loud bursts' ODF peaks is {spread:.1} times the weakest"
+    );
+    let rounded: Vec<f64> = heights
+        .iter()
+        .map(|h| (h * 100.0).round() / 100.0)
+        .collect();
+    assert_eq!(
+        rounded,
+        vec![0.21, 0.19, 0.14, 1.94, 4.41, 4.62, 5.82, 5.15]
+    );
+    assert_eq!((spread * 10.0).round(), 30.0);
     assert_eq!(m.ncols(), 367);
     let reduced = m.ncols() / 4; // separation 512 is reduced to len/4 frames
     assert_eq!(reduced, 91);
@@ -308,35 +325,69 @@ fn main() {
     // ------------------------------------------------------------ 4. Tempo
     println!("\n4. Tempo by autocorrelation of the onset envelope (hop 512, 86.13 frames/s)");
     println!("   true BPM | estimate | lag (frames) | estimate / true");
-    let mut results = Vec::new();
-    for bpm in [60.0, 80.0, 100.0, 120.0, 140.0, 174.0] {
+    let cfg = BeatTrackingConfig::new(120.0, None, OnsetDetectionConfig::default());
+    // Clicks every 60/bpm s from 0.1 s; every other click (the off-beats) at `off` of
+    // the on-beat amplitude 0.9.
+    let tempo_track = |bpm: f64, off: f64| {
         let ibi = 60.0 / bpm;
         let n = (8.0 / ibi) as usize;
         let times: Vec<f64> = (0..n).map(|k| 0.1 + ibi * k as f64).collect();
-        let track = click_track(&times, 8.5);
-        let cfg = BeatTrackingConfig::new(120.0, None, OnsetDetectionConfig::default());
+        let amps: Vec<f64> = (0..n)
+            .map(|k| if k % 2 == 0 { 0.9 } else { 0.9 * off })
+            .collect();
+        (click_track(&times, &amps, 8.5), times)
+    };
+    let mut results = Vec::new();
+    for (bpm, off) in [
+        (60.0, 1.0),
+        (80.0, 1.0),
+        (100.0, 1.0),
+        (120.0, 1.0),
+        (140.0, 1.0),
+        (174.0, 1.0),
+        (80.0, 0.2),
+    ] {
+        let (track, _) = tempo_track(bpm, off);
         let est = track.estimate_tempo(&cfg).expect("tempo");
         let env = onset_strength_envelope(&track, &cfg.onset_config, None).expect("envelope");
         let (mine, lag, ac) = my_tempo(&env);
-        println!("   {bpm:8.0} | {est:8.2} | {lag:12} | {:.3}", est / bpm);
+        let label = if off < 1.0 { " (quiet off-beats)" } else { "" };
+        println!(
+            "   {bpm:8.0} | {est:8.2} | {lag:12} | {:.3}{label}",
+            est / bpm
+        );
         assert!((mine - est).abs() < 1e-9, "re-derived {mine} vs {est}");
-        results.push((bpm, est, ac));
+        results.push((bpm, off, est, ac));
     }
-    let est = |b: f64| results.iter().find(|r| r.0 == b).expect("tempo").1;
-    assert!((est(120.0) - 120.19).abs() < 0.005);
-    assert!((est(80.0) - 40.06).abs() < 0.005); // half tempo
-    assert!((est(174.0) - 58.07).abs() < 0.005); // a third
-    for (b, e) in [(60.0, 60.09), (100.0, 99.38), (140.0, 139.67)] {
-        assert!((est(b) - e).abs() < 0.005);
+    let est = |b: f64, off: f64| {
+        results
+            .iter()
+            .find(|r| r.0 == b && r.1 == off)
+            .expect("tempo")
+            .2
+    };
+    for (b, e) in [
+        (60.0, 60.09),
+        (80.0, 79.51),
+        (100.0, 99.38),
+        (120.0, 120.19),
+        (140.0, 139.67),
+        (174.0, 172.27),
+    ] {
+        assert!((est(b, 1.0) - e).abs() < 0.005);
     }
-    let ac80 = &results.iter().find(|r| r.0 == 80.0).expect("80").2;
+    assert!((est(80.0, 0.2) - 40.06).abs() < 0.005); // half tempo
+    let ac80 = &results
+        .iter()
+        .find(|r| r.0 == 80.0 && r.1 == 0.2)
+        .expect("80")
+        .3;
     println!(
-        "   80 BPM: autocorrelation at lag 65 (79.5 BPM) {:.5}, at lag 129 (40.1 BPM) {:.5}",
+        "   80 BPM, quiet off-beats: autocorrelation at lag 65 (79.5 BPM) {:.5}, at lag 129 (40.1 BPM) {:.5}",
         ac80[65], ac80[129]
     );
-    assert!(ac80[129] > 10.0 * ac80[65]);
-    assert!((ac80[129] - 0.00240).abs() < 5e-6 && (ac80[65] - 0.00012).abs() < 5e-6);
-    assert!((ac80[129] / ac80[65]).round() == 20.0);
+    assert!(ac80[129] > 0.0 && ac80[65] > 0.0);
+    assert!((ac80[129] - 0.00607).abs() < 5e-6 && (ac80[65] - 0.00181).abs() < 5e-6);
     let prior = |lag: f64| {
         let z = (60.0 * SR / HOP / lag).log2() - 120f64.log2();
         (-0.5 * z * z).exp()
@@ -347,35 +398,31 @@ fn main() {
         prior(129.0)
     );
     assert!((prior(65.0) - 0.84).abs() < 0.005 && (prior(129.0) - 0.29).abs() < 0.005);
+    assert!(ac80[129] * prior(129.0) > ac80[65] * prior(65.0));
+    assert!((ac80[129] / ac80[65] - 3.35).abs() < 0.005);
 
-    let times80: Vec<f64> = (0..10).map(|k| 0.1 + 0.75 * f64::from(k)).collect();
-    let (_, odf80) = click_track(&times80, 8.5)
+    let (accented, times80) = tempo_track(80.0, 0.2);
+    let (_, odf80) = accented
         .onset_detection_function(&OnsetDetectionConfig::default())
         .expect("odf");
     let per_click: Vec<f64> = times80
         .iter()
         .map(|t| {
             let f = (t * SR / HOP).round() as usize;
-            (f.saturating_sub(6)..=f)
+            (f.saturating_sub(2)..=f + 1)
                 .map(|i| odf80[i])
                 .fold(0.0, f64::max)
         })
         .collect();
-    println!(
-        "   80 BPM onset function at each click: {:?}",
-        per_click
-            .iter()
-            .map(|v| (v * 100.0).round() / 100.0)
-            .collect::<Vec<_>>()
-    );
-    println!("   every other click is close to zero, so the envelope repeats every two beats");
     let rounded: Vec<f64> = per_click
         .iter()
         .map(|v| (v * 100.0).round() / 100.0)
         .collect();
+    println!("   80 BPM onset function at each click: {rounded:?}");
+    println!("   the off-beats are much weaker, so the envelope repeats every two beats");
     assert_eq!(
         rounded,
-        vec![0.88, 0.0, 2.6, 0.08, 13.42, 0.71, 0.0, 3.27, 0.03, 8.69]
+        vec![3.83, 1.32, 3.61, 0.49, 5.77, 0.38, 5.9, 0.79, 2.82, 0.73]
     );
 
     // ------------------------------------------------------------ 5. Explain

@@ -57,7 +57,7 @@
 //! assert_eq!(onsets.len(), 4);
 //! for (k, t) in onsets.iter().enumerate() {
 //!     let truth = 0.25 + 0.5 * k as f64;
-//!     assert!((t - truth).abs() < 0.05, "onset {t:.3} s vs {truth} s");
+//!     assert!((t - truth).abs() < 0.009, "onset {t:.3} s vs {truth} s");
 //! }
 //! ```
 //!
@@ -107,12 +107,25 @@
 //!   strongest (normalised) ODF peak, so much weaker onsets in the same clip
 //!   are missed; lower `adaptive_threshold.min_threshold` for material with a
 //!   wide dynamic range.
-//! - The CQT response of the external `spectrograms` crate to identical clicks
-//!   varies strongly from click to click (up to ~100×, alternating), so
-//!   weaker clicks can fall below any threshold and tempo estimates built on
-//!   the ODF can show octave errors.
-//! - Reported times are frame centres and may precede the true onset by a
-//!   fraction of the CQT window (about 30 ms in the example above).
+//! - A bin whose kernel (`Q·f_s/f_b` samples, see [`onset_cqt_params`]) is
+//!   shorter than the hop sees only part of each hop, so the response to a
+//!   short click depends on where it falls relative to the frame grid. With
+//!   the defaults at 44.1 kHz (bins above about 2.9 kHz) the ODF peaks of eight
+//!   similar noise bursts differ by a factor of about 3.
+//! - Reported times are frame centres. The longest kernels span the analysis
+//!   window (four periods of `f_min`) and start to respond before an onset, so
+//!   the largest increase usually falls in the last frame before it. On the
+//!   click track above every reported time is within 9 ms of its burst, less
+//!   than one hop.
+//! - The complex-domain detection functions
+//!   ([`AudioOnsetDetection::onset_detection_function_complex`] and
+//!   [`SpectralFluxMethod::Complex`] / [`SpectralFluxMethod::RectifiedComplex`])
+//!   use [`AudioTransforms::constant_q_transform`], whose frames are
+//!   `min(signal_len, 16384)` samples long whatever `window_size` says. The
+//!   phase-deviation term weights every bin equally however quiet it is, and
+//!   in silence every bin deviates by its full expected phase advance, so on
+//!   sparse material such as a click track that term dominates the complex
+//!   ODF, which is then nearly constant and dips at the onsets.
 //!
 
 pub mod complex;
@@ -143,6 +156,72 @@ use crate::{
         types::PeakPickingConfig,
     },
 };
+
+/// Returns the CQT parameters of the default onset configurations.
+///
+/// 144 bins, 24 per octave over six octaves from 55 Hz (A1), with Hann kernels
+/// normalised to unit energy and coefficients below 2% of a kernel's peak dropped.
+/// The quality factor is the constant Q of the bin spacing, `1/(2^(1/24) − 1) ≈ 34.1`,
+/// at which adjacent bins' bandwidths meet; a bin's kernel spans Q periods of its
+/// centre frequency, shortened to the analysis window (by default four periods of
+/// 55 Hz). [`OnsetDetectionConfig::default`], [`OnsetDetectionConfig::speech`] and
+/// [`SpectralFluxConfig::musical`] use these parameters.
+///
+/// The configurations whose detection function needs the phase
+/// ([`SpectralFluxConfig::complex`] and the [`ComplexOnsetConfig`] presets) keep
+/// [`CqtParams::onset_detection`]: their transform,
+/// [`AudioTransforms::constant_q_transform`], analyses frames of
+/// `min(signal_len, 16384)` samples rather than the analysis window, so constant-Q
+/// kernels would span up to 16384 samples at the low bins.
+///
+/// A kernel shorter than a few periods of its centre frequency has almost no
+/// frequency selectivity and gives magnitudes that depend on the phase of the
+/// signal, so a steady tone produces a fluctuating ODF; a much lower `q_factor`
+/// than this one is not suitable for onset detection.
+///
+/// # Example
+///
+/// ```
+/// use audio_samples::operations::onset::{OnsetDetectionConfig, onset_cqt_params};
+///
+/// let params = onset_cqt_params();
+/// assert_eq!(params.num_bins().get(), 144);
+/// assert!((params.q_factor - 34.127).abs() < 1e-3);
+/// assert_eq!(OnsetDetectionConfig::default().cqt_params, params);
+/// ```
+#[inline]
+#[must_use]
+pub fn onset_cqt_params() -> CqtParams {
+    with_constant_q(CqtParams::onset_detection())
+}
+
+/// The time in seconds that each frame of [`AudioTransforms::constant_q_transform`] describes.
+///
+/// Its frames are `N = min(signal_len, 16384)` samples long, start at `i·H` and are not
+/// padded, and every kernel sits in the middle of the frame, so frame `i` describes the
+/// signal around sample `i·H + N/2`.
+fn cqt_frame_times(
+    n_frames: NonZeroUsize,
+    signal_len: NonZeroUsize,
+    hop_size: NonZeroUsize,
+    sample_rate: f64,
+) -> NonEmptyVec<f64> {
+    let centre = (signal_len.get().min(16_384) / 2) as f64;
+    let hop = hop_size.get() as f64;
+    let times: Vec<f64> = (0..n_frames.get())
+        .map(|i| hop.mul_add(i as f64, centre) / sample_rate)
+        .collect();
+    // safety: n_frames is non-zero, so `times` has at least one element
+    unsafe { NonEmptyVec::new_unchecked(times) }
+}
+
+/// Sets `q_factor` to the constant Q of the bin spacing, `1/(2^(1/b) − 1)` for `b`
+/// bins per octave.
+fn with_constant_q(mut params: CqtParams) -> CqtParams {
+    let b = params.bins_per_octave.get() as f64;
+    params.q_factor = 1.0 / ((1.0 / b).exp2() - 1.0);
+    params
+}
 
 /// Configuration parameters for energy-based onset detection using CQT magnitude spectrograms.
 ///
@@ -283,7 +362,9 @@ impl OnsetDetectionConfig {
     ///
     /// - CQT: Percussive preset (higher frequency resolution)
     /// - Hop size: 256 samples
-    /// - Adaptive threshold: Enabled (3-frame median, multiplier 2.0)
+    /// - Adaptive threshold: Enabled (5-frame median, multiplier 2.0). A peak survives if it is
+    ///   at least twice the running median; over 5 frames that holds for a hit whose ODF peak
+    ///   is split between two adjacent frames, which a 3-frame median would remove.
     /// - Peak picking: [`PeakPickingConfig::drums`] (minimum spacing 30 ms)
     ///
     /// # Arguments
@@ -311,7 +392,7 @@ impl OnsetDetectionConfig {
         let hop_size = crate::nzu!(256);
         let window = None;
         let adaptive_threshold = true;
-        let median_filter_length = crate::nzu!(3);
+        let median_filter_length = crate::nzu!(5);
         let adaptive_threshold_multiplier = 2.0;
         let peak_picking = PeakPickingConfig::drums(sample_rate, hop_size);
         Self::new(
@@ -357,7 +438,7 @@ impl OnsetDetectionConfig {
     #[inline]
     #[must_use]
     pub fn musical(sample_rate: SampleRate) -> Self {
-        let cqt_config = CqtParams::musical();
+        let cqt_config = with_constant_q(CqtParams::musical());
         let hop_size = crate::nzu!(512);
         let window = None;
         let adaptive_threshold = true;
@@ -407,7 +488,7 @@ impl OnsetDetectionConfig {
     #[inline]
     #[must_use]
     pub fn speech(sample_rate: SampleRate) -> Self {
-        let cqt_config = CqtParams::onset_detection();
+        let cqt_config = onset_cqt_params();
         let hop_size = crate::nzu!(256);
         let window = None;
         let adaptive_threshold = true;
@@ -430,7 +511,7 @@ impl Default for OnsetDetectionConfig {
     #[inline]
     fn default() -> Self {
         Self::new(
-            CqtParams::onset_detection(),
+            onset_cqt_params(),
             crate::nzu!(512),
             None,
             true,
@@ -600,8 +681,13 @@ impl SpectralFluxConfig {
 
     /// Creates a configuration optimised for percussive onset detection.
     ///
-    /// Uses energy-based flux with high compression for detecting drum hits and other sharp
-    /// transient events. Rectification is enabled to focus on energy increases.
+    /// Uses energy-based flux on [`CqtParams::percussive`] (hop 256), rectified and compressed
+    /// with `ln(1 + 10·x)`, and [`PeakPickingConfig::drums`].
+    ///
+    /// The compression is mild on purpose. The low bins' kernels span most of the
+    /// 4-period analysis window, so they start to respond to a hit about a quarter of the
+    /// window before it; strong compression (`log_compression` 100 or more on full-scale
+    /// hits) raises that early rise to a peak of its own, and each hit is reported twice.
     ///
     /// # Arguments
     ///
@@ -616,10 +702,29 @@ impl SpectralFluxConfig {
     /// # Example
     ///
     /// ```
-    /// use audio_samples::sample_rate;
+    /// use audio_samples::{AudioSamples, sample_rate};
+    /// use audio_samples::operations::traits::AudioOnsetDetection;
     /// use audio_samples::operations::onset::SpectralFluxConfig;
+    /// use ndarray::Array1;
     ///
-    /// let config = SpectralFluxConfig::percussive(sample_rate!(44100));
+    /// // Clicks (decaying 3 kHz bursts) at 0.25, 0.75, 1.25 and 1.75 s.
+    /// let sr = 44_100;
+    /// let mut x = vec![0.0f64; 2 * sr];
+    /// for k in 0..4 {
+    ///     let start = sr / 4 + k * sr / 2;
+    ///     for i in 0..512 {
+    ///         x[start + i] = 0.9 * (-(i as f64) / 48.0).exp() * (0.43 * i as f64).sin();
+    ///     }
+    /// }
+    /// let audio = AudioSamples::new_mono(Array1::from_vec(x), sample_rate!(44100)).unwrap();
+    ///
+    /// let config = SpectralFluxConfig::percussive(audio.sample_rate());
+    /// assert_eq!(config.log_compression, 10.0);
+    /// let onset_times = audio.detect_onsets_spectral_flux(&config).unwrap();
+    /// assert_eq!(onset_times.len(), 4);
+    /// for (k, t) in onset_times.iter().enumerate() {
+    ///     assert!((t - (0.25 + 0.5 * k as f64)).abs() < 0.005);
+    /// }
     /// ```
     #[inline]
     #[must_use]
@@ -632,7 +737,7 @@ impl SpectralFluxConfig {
             flux_method: SpectralFluxMethod::Energy,
             peak_picking: PeakPickingConfig::drums(sample_rate, hop_size),
             rectify: true,
-            log_compression: 1000.0,
+            log_compression: 10.0,
         }
     }
 
@@ -664,7 +769,7 @@ impl SpectralFluxConfig {
     pub fn musical(sample_rate: SampleRate) -> Self {
         let hop_size = crate::nzu!(512);
         Self {
-            cqt_params: CqtParams::onset_detection(),
+            cqt_params: onset_cqt_params(),
             hop_size,
             window_size: None,
             flux_method: SpectralFluxMethod::Magnitude,
@@ -1101,9 +1206,9 @@ where
     /// let config = OnsetDetectionConfig::musical(audio.sample_rate());
     /// let onset_times = audio.detect_onsets(&config).unwrap();
     /// assert_eq!(onset_times.len(), 4);
-    /// // The long low-frequency CQT kernels see each click a few frames early.
+    /// // Within one hop (11.6 ms) of each click.
     /// for (k, t) in onset_times.iter().enumerate() {
-    ///     assert!((t - (0.25 + 0.5 * k as f64)).abs() < 0.06);
+    ///     assert!((t - (0.25 + 0.5 * k as f64)).abs() < 512.0 / 44_100.0);
     /// }
     /// ```
     #[inline]
@@ -1216,9 +1321,11 @@ where
     /// let config = SpectralFluxConfig::musical(audio.sample_rate());
     /// let onset_times = audio.detect_onsets_spectral_flux(&config).unwrap();
     /// assert_eq!(onset_times.len(), 4);
-    /// // The long low-frequency CQT kernels see each click a few frames early.
+    /// // The magnitude flux counts decreases as well as increases; its peaks come
+    /// // 29 to 32 ms before each click.
     /// for (k, t) in onset_times.iter().enumerate() {
-    ///     assert!((t - (0.25 + 0.5 * k as f64)).abs() < 0.06);
+    ///     let lead = 0.25 + 0.5 * k as f64 - t;
+    ///     assert!(lead > 0.028 && lead < 0.033);
     /// }
     /// ```
     #[inline]
@@ -1232,7 +1339,7 @@ where
             // safety: sample_rate is positive and f_min is positive, so min_period is positive
             unsafe { NonZeroUsize::new_unchecked((min_period * 4.0) as usize) }
         });
-        let (_times, mut flux) = self.spectral_flux(
+        let (times, mut flux) = self.spectral_flux(
             &config.cqt_params,
             window_size,
             config.hop_size,
@@ -1249,10 +1356,7 @@ where
 
         let peaks = pick_peaks(&flux, &config.peak_picking)?;
 
-        Ok(peaks
-            .into_iter()
-            .map(|idx| (idx as f64 * config.hop_size.get() as f64) / sample_rate)
-            .collect())
+        Ok(peaks.into_iter().map(|idx| times[idx]).collect())
     }
 
     /// Computes spectral flux using the specified method.
@@ -1306,28 +1410,22 @@ where
             }
             SpectralFluxMethod::Complex => {
                 let cqt_result = self.constant_q_transform(config, hop_size)?;
-                let n_frames = cqt_result.n_frames().get();
-                // safety: cqt() guarantees n_frames >= 1
-                let times = unsafe {
-                    NonEmptyVec::new_unchecked(
-                        (0..n_frames)
-                            .map(|i| i as f64 * hop_size.get() as f64 / sample_rate)
-                            .collect(),
-                    )
-                };
+                let times = cqt_frame_times(
+                    cqt_result.n_frames(),
+                    self.samples_per_channel(),
+                    hop_size,
+                    sample_rate,
+                );
                 (times, complex_flux(&cqt_result.data))
             }
             SpectralFluxMethod::RectifiedComplex => {
                 let cqt_result = self.constant_q_transform(config, hop_size)?;
-                let n_frames = cqt_result.n_frames().get();
-                // safety: cqt() guarantees n_frames >= 1
-                let times = unsafe {
-                    NonEmptyVec::new_unchecked(
-                        (0..n_frames)
-                            .map(|i| i as f64 * hop_size.get() as f64 / sample_rate)
-                            .collect(),
-                    )
-                };
+                let times = cqt_frame_times(
+                    cqt_result.n_frames(),
+                    self.samples_per_channel(),
+                    hop_size,
+                    sample_rate,
+                );
                 (times, rectified_complex_flux(&cqt_result.data))
             }
         };
@@ -1384,14 +1482,16 @@ where
         &self,
         onset_config: &ComplexOnsetConfig,
     ) -> AudioSampleResult<Vec<f64>> {
-        let sample_rate = self.sample_rate_hz();
         let odf = self.onset_detection_function_complex(onset_config)?;
         let peaks = pick_peaks(&odf, &onset_config.peak_picking)?;
+        let times = cqt_frame_times(
+            odf.len(),
+            self.samples_per_channel(),
+            onset_config.hop_size,
+            self.sample_rate_hz(),
+        );
 
-        Ok(peaks
-            .into_iter()
-            .map(|idx| (idx as f64 * onset_config.hop_size.get() as f64) / sample_rate)
-            .collect())
+        Ok(peaks.into_iter().map(|idx| times[idx]).collect())
     }
 
     /// Computes the complex domain onset detection function.
@@ -1600,6 +1700,110 @@ mod cqt_dedup_tests {
         assert_eq!(detected.len(), onsets.len(), "detected {detected:?}");
         for (d, t) in detected.iter().zip(&onsets) {
             assert!((d - t).abs() <= 0.05, "detected {detected:?}");
+        }
+    }
+
+    /// Decaying noise bursts (256 samples, time constant 24 samples) at `times`.
+    fn noise_clicks(sr: u32, seconds: f64, times: &[f64]) -> AudioSamples<'static, f64> {
+        let mut x = vec![0.0f64; (seconds * f64::from(sr)) as usize];
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        for &t in times {
+            let start = (t * f64::from(sr)) as usize;
+            for (i, v) in x[start..start + 256].iter_mut().enumerate() {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let r = (seed >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0;
+                *v = 0.9 * (-(i as f64) / 24.0).exp() * r;
+            }
+        }
+        let sr = crate::repr::SampleRate::new(sr).unwrap();
+        AudioSamples::new_mono(Array1::from_vec(x), sr).unwrap()
+    }
+
+    /// A single decaying harmonic note gives one ODF peak: the default CQT's magnitudes
+    /// of a steady tone do not fluctuate from frame to frame.
+    #[test]
+    fn default_odf_has_one_peak_per_note() {
+        let sr = 22_050.0;
+        let start = (0.3 * sr) as usize;
+        let data: Vec<f64> = (0..(2.0 * sr) as usize)
+            .map(|i| {
+                if i < start {
+                    return 0.0;
+                }
+                let t = (i - start) as f64 / sr;
+                let env = (t / 0.005).min(1.0) * (-t / 0.12).exp();
+                let w = 2.0 * std::f64::consts::PI * 440.0 * t;
+                0.3 * env * (w.sin() + 0.5 * (2.0 * w).sin() + 0.25 * (3.0 * w).sin())
+            })
+            .collect();
+        let audio = AudioSamples::new_mono(Array1::from_vec(data), sample_rate!(22050)).unwrap();
+        let config = OnsetDetectionConfig {
+            adaptive_threshold: false,
+            ..Default::default()
+        };
+        let (_, odf) = audio.onset_detection_function(&config).unwrap();
+        let max = odf.iter().fold(0.0f64, |m, v| m.max(*v));
+        let strong: Vec<usize> = (0..odf.len().get())
+            .filter(|&i| odf[i] > 0.05 * max)
+            .collect();
+        let onset_frame = (0.3 * sr / 512.0).round() as usize;
+        assert!(
+            strong.iter().all(|&i| i.abs_diff(onset_frame) <= 1),
+            "frames above 5% of the peak: {strong:?}"
+        );
+    }
+
+    /// The percussive presets find every click of a click track, once each.
+    #[test]
+    fn percussive_presets_find_every_click() {
+        let truth: Vec<f64> = (0..8).map(|k| 0.25 + 0.5 * f64::from(k)).collect();
+        for sr in [22_050u32, 44_100, 48_000] {
+            let audio = noise_clicks(sr, 4.25, &truth);
+            let rate = crate::repr::SampleRate::new(sr).unwrap();
+            let energy = audio
+                .detect_onsets(&OnsetDetectionConfig::percussive(rate))
+                .unwrap();
+            let flux = audio
+                .detect_onsets_spectral_flux(&SpectralFluxConfig::percussive(rate))
+                .unwrap();
+            for (name, found) in [("energy", energy), ("flux", flux)] {
+                assert_eq!(found.len(), truth.len(), "{name} at {sr} Hz: {found:?}");
+                for (t, want) in found.iter().zip(&truth) {
+                    assert!((t - want).abs() < 0.012, "{name} at {sr} Hz: {found:?}");
+                }
+            }
+        }
+    }
+
+    /// `constant_q_transform` frames are labelled with the sample their kernels are centred on.
+    #[test]
+    fn complex_detectors_report_frame_centres() {
+        let audio = noise_clicks(44_100, 2.0, &[0.25, 0.75, 1.25, 1.75]);
+        let config = ComplexOnsetConfig::default();
+        let md = audio.magnitude_difference_matrix(&config).unwrap();
+        let times = cqt_frame_times(
+            NonZeroUsize::new(md.ncols()).unwrap(),
+            audio.samples_per_channel(),
+            config.hop_size,
+            44_100.0,
+        );
+        assert!((times[0] - 8192.0 / 44_100.0).abs() < 1e-12);
+        // The magnitude rises in the frame nearest each click.
+        for click in [0.75, 1.25, 1.75] {
+            let frame = (0..md.ncols())
+                .filter(|&i| (times[i] - click).abs() < 0.1)
+                .max_by(|&a, &b| {
+                    let rise = |i: usize| md.column(i).iter().map(|v| v.max(0.0)).sum::<f64>();
+                    rise(a).total_cmp(&rise(b))
+                })
+                .unwrap();
+            assert!(
+                (times[frame] - click).abs() <= 512.0 / 44_100.0,
+                "{click}: {}",
+                times[frame]
+            );
         }
     }
 }
