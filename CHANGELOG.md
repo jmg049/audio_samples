@@ -11,6 +11,11 @@ the one-line `Display` format, and setters and lookups that now return errors
 instead of panicking. *Output changes in released (2.0.x) APIs* lists operations
 whose results change for the same input.
 
+Requires `spectrograms` 2.2.0 and `i24` 2.3.6. spectrograms 2.2.0 fixes the Kaiser
+window for β > 3.75, spaces gammatone and ERB filters on the ERB-number scale, and
+centres CQT kernels in the frame (events were reported early), so those outputs
+change. Neither crate enables pyo3's `experimental-inspect` any more.
+
 - **`ResamplingQuality::VeryHigh`**: windowed sinc with a 185 dB stopband from the Nyquist
   frequency on (ripple below 1e-9) and its passband to 0.95 of the lower Nyquist frequency for
   decimation by a power of two, 0.98 for other ratios whose terms have no prime factor above 7
@@ -694,13 +699,9 @@ odd-length spectral bin spacing, `frequency_to_note` and
 
 ### Known issues
 
-- Upstream limitations of the `spectrograms` crate (2.1.3) that this crate
-  inherits:
-  - `WindowType::Kaiser` is inaccurate for β > 3.75.
-  - The gammatone filterbank's default centre frequencies are spaced linearly
-    in Hz, not on the ERB-number scale.
-  - A mel spectrogram's `frequencies()` axis ignores `f_min`/`f_max`; it is
-    correct only for the range 0 Hz to Nyquist.
+- A mel spectrogram's `frequencies()` axis ignores `f_min`/`f_max`; it is
+  correct only for the range 0 Hz to Nyquist. This is inherited from the
+  `spectrograms` crate (2.2.0).
 
 ## 2.0.0
 

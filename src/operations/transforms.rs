@@ -43,14 +43,9 @@
 //!
 //! ## Limitations
 //!
-//! - `WindowType::Kaiser { beta }` is wrong for `beta > 3.75` (the modified Bessel
-//!   function I₀ is evaluated incorrectly).
 //! - `MelSpectrogram::frequencies()` assumes the mel range runs from 0 Hz to the
 //!   Nyquist frequency and ignores `MelParams::f_min` and `f_max`, so its axis is
 //!   wrong for any other range.
-//! - With the default `ErbSpacing::Linear`, the gammatone centre frequencies are
-//!   spaced uniformly in ERB bandwidth, 24.7·(4.37 f/1000 + 1), which is linear in
-//!   Hz, not uniform on the ERB-number scale.
 //! - A window of length 1 (`n_fft = 1`) gives NaN for Hann, Hamming and Blackman;
 //!   use `n_fft ≥ 2`.
 //!
@@ -746,14 +741,10 @@ where
     /// Computes a gammatone-filtered spectrogram.
     ///
     /// Gammatone filters model the bandpass response of the human
-    /// cochlea. Note: with the default `ErbSpacing::Linear`, the `spectrograms` crate
-    /// spaces the centre frequencies uniformly in ERB **bandwidth**
-    /// 24.7·(4.37 f/1000 + 1), which is linear in Hz, **not** on the ERB-number
-    /// (Cam) scale 21.4·log10(1 + 0.00437 f). For auditory
-    /// (ERB-rate) spacing use
-    /// `GammatoneParams::new(..)?.with_spacing(ErbSpacing::AppleTr35)` (Slaney /
-    /// Patterson spacing, uniform in ln(f + 228.7), equivalent to the
-    /// Glasberg & Moore ERB-number scale). Prefer the
+    /// cochlea. With the default `ErbSpacing::Linear` the centre frequencies are
+    /// spaced uniformly on the ERB-number (Cam) scale 21.4·log10(1 + 0.00437 f)
+    /// (Glasberg & Moore). `ErbSpacing::AppleTr35` gives Slaney / Patterson
+    /// spacing, uniform in ln(f + 228.7), which is nearly the same scale. Prefer the
     /// typed convenience methods -
     /// [`gammatone_magnitude_spectrogram`](crate::operations::AudioTransforms::gammatone_magnitude_spectrogram),
     /// [`gammatone_power_spectrogram`](crate::operations::AudioTransforms::gammatone_power_spectrogram), or
@@ -830,7 +821,10 @@ where
     /// Note: frames are `min(signal_len, 16384)` samples
     /// long and are not centred, so a signal shorter than 16384 samples yields a
     /// single frame whatever `hop_size` is; kernels longer than the frame are
-    /// truncated, which lowers the effective Q at low frequencies.
+    /// truncated, which lowers the effective Q at low frequencies. Frame `i` starts
+    /// at sample `i·hop_size` and every kernel sits in the middle of the frame, so
+    /// with `N` the frame length, frame `i` describes the signal around sample
+    /// `i·hop_size + N/2`.
     ///
     /// # Arguments
     /// - `params` - CQT parameters (frequency range, bins per octave,

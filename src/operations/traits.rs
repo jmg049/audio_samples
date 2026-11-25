@@ -2539,7 +2539,7 @@ where
     /// 10·log10(max(mel power, 10^(floor_db/10))) re 1. See the
     /// [`crate::operations::transforms`] module docs for the formulas.
     ///
-    /// Note: in `spectrograms` 2.1.3 the result's `frequencies()` axis is only
+    /// Note: in `spectrograms` 2.2.0 the result's `frequencies()` axis is only
     /// correct when `f_min = 0` and `f_max` = Nyquist; for other ranges compute the
     /// band centres yourself (the inner `n_mels` of `n_mels + 2` points equally
     /// spaced on the Slaney mel scale between `f_min` and `f_max`).
@@ -2821,14 +2821,10 @@ where
     /// Computes a gammatone-filtered spectrogram.
     ///
     /// Gammatone filters model the bandpass response of the human
-    /// cochlea. Note: with the default `ErbSpacing::Linear`, `spectrograms` 2.1.3
-    /// spaces the centre frequencies uniformly in ERB **bandwidth**
-    /// 24.7·(4.37 f/1000 + 1), which is linear in Hz, **not** on the ERB-number
-    /// (Cam) scale 21.4·log10(1 + 0.00437 f) (an upstream bug). For auditory
-    /// (ERB-rate) spacing use
-    /// `GammatoneParams::new(..)?.with_spacing(ErbSpacing::AppleTr35)` (Slaney /
-    /// Patterson spacing, uniform in ln(f + 228.7), equivalent to the
-    /// Glasberg & Moore ERB-number scale). Prefer the
+    /// cochlea. With the default `ErbSpacing::Linear` the centre frequencies are
+    /// spaced uniformly on the ERB-number (Cam) scale 21.4·log10(1 + 0.00437 f)
+    /// (Glasberg & Moore). `ErbSpacing::AppleTr35` gives Slaney / Patterson
+    /// spacing, uniform in ln(f + 228.7), which is nearly the same scale. Prefer the
     /// typed convenience methods -
     /// [`gammatone_magnitude_spectrogram`](crate::operations::AudioTransforms::gammatone_magnitude_spectrogram),
     /// [`gammatone_power_spectrogram`](crate::operations::AudioTransforms::gammatone_power_spectrogram), or
@@ -2969,10 +2965,13 @@ where
     /// analysis. The kernel for bin k is about Q·f_s/f_k samples long, so low
     /// bins have long kernels (good frequency, poor time resolution).
     ///
-    /// Note (`spectrograms` 2.1.3): frames are `min(signal_len, 16384)` samples
+    /// Note (`spectrograms` 2.2.0): frames are `min(signal_len, 16384)` samples
     /// long and are not centred, so a signal shorter than 16384 samples yields a
     /// single frame whatever `hop_size` is; kernels longer than the frame are
-    /// truncated, which lowers the effective Q at low frequencies.
+    /// truncated, which lowers the effective Q at low frequencies. Frame `i` starts
+    /// at sample `i·hop_size` and every kernel sits in the middle of the frame, so
+    /// with `N` the frame length, frame `i` describes the signal around sample
+    /// `i·hop_size + N/2`.
     ///
     /// # Arguments
     /// - `params` - CQT parameters (frequency range, bins per octave,

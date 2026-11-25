@@ -1220,7 +1220,7 @@ where
 
 /// Replaces the frequency axis of a mel spectrogram with its true band centres.
 ///
-/// `spectrograms` 2.1.3 reports mel band centres for the range 0 Hz to Nyquist
+/// `spectrograms` 2.2.0 reports mel band centres for the range 0 Hz to Nyquist
 /// regardless of `MelParams::f_min`/`f_max`, so its `frequencies()` axis is wrong
 /// whenever the mel range is narrower. This rebuilds the axis exactly as the
 /// filterbank is built: `n_mels + 2` points equally spaced on the Slaney mel scale
