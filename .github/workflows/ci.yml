@@ -111,9 +111,9 @@ jobs:
         run: cargo doc --no-deps --features "$FEATURES"
 
   docs-rs:
-    name: doc (docs.rs, all features)
+    name: doc (docs.rs features)
     runs-on: ubuntu-24.04
-    # Mirrors [package.metadata.docs.rs]: nightly rustdoc, all features, and
+    # Mirrors [package.metadata.docs.rs]: nightly rustdoc, its feature list, and
     # `--cfg docsrs` for the feature badges.
     env:
       RUSTDOCFLAGS: --cfg docsrs --html-in-header documentation/katex-header.html -D warnings
@@ -126,7 +126,7 @@ jobs:
           rustup toolchain install nightly --profile minimal --no-self-update
           rustup default nightly
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo doc --no-deps --all-features
+      - run: cargo doc --no-deps --features full,educational,simd,python,fancy,html_view
 
   msrv:
     name: msrv (1.95)

@@ -19,7 +19,9 @@ categories = ["multimedia::audio", "science"]
 exclude = ["book/", "benchmarks/", ".github/", ".pre-commit-config.yaml"]
 
 [package.metadata.docs.rs]
-all-features = true
+# Every feature except `static-plots`, whose build script needs Chrome and network
+# access, neither of which docs.rs has.
+features = ["full", "educational", "simd", "python", "fancy", "html_view"]
 rustdoc-args = ["--cfg", "docsrs", "--html-in-header", "documentation/katex-header.html"]
 
 [lib]
