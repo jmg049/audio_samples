@@ -2,7 +2,14 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## 3.0.0
+
+A breaking release. Code written for 2.0 needs the changes listed under
+*Changed*: removed `OnsetDetectionConfig` fields and `NdResult` methods, the
+fixed-size buffer types' mutable access, onset presets that take the sample rate,
+the one-line `Display` format, and setters and lookups that now return errors
+instead of panicking. *Output changes in released (2.0.x) APIs* lists operations
+whose results change for the same input.
 
 - **`ResamplingQuality::VeryHigh`**: windowed sinc with a 185 dB stopband from the Nyquist
   frequency on (ripple below 1e-9) and its passband to 0.95 of the lower Nyquist frequency for

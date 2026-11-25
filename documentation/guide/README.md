@@ -50,7 +50,7 @@ snippets in a crate of your own, add these dependencies to its `Cargo.toml`
 
 ```toml
 [dependencies]
-audio_samples = { version = "2", features = ["educational", "full_no_plotting"] }
+audio_samples = { version = "3", features = ["educational", "full_no_plotting"] }
 spectrograms = "2.1.3"    # StftParams, WindowType, MelParams, LogParams, ...
 ndarray = "0.17"          # Array1 and the array! macro
 num-complex = "0.4"       # complex numbers in the "How it works" sections
