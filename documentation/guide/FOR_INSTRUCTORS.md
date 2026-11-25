@@ -139,9 +139,8 @@ guide differ from librosa.
 
 Known limitations worth telling students about are documented in each module
 and listed under "Known issues" in the crate's `CHANGELOG.md`. For example, in
-this release the external `spectrograms` crate's Kaiser window is inaccurate for
-β > 3.75, the gammatone filterbank's default centre spacing is linear in Hz,
-and the mel spectrogram's `frequencies()` axis ignores `f_min`/`f_max`.
+this release the mel spectrogram's `frequencies()` axis, which comes from the
+external `spectrograms` crate, ignores `f_min`/`f_max`.
 
 Limitations of the teaching material itself:
 

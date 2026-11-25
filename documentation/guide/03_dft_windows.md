@@ -314,8 +314,6 @@ assert_eq!(count(1024), 1);
   periodic window through `WindowType::Custom` when you need it.
 * Zero padding interpolates the spectrum onto a finer grid; it does not improve
   resolution.
-* The Kaiser window in `spectrograms` 2.1.3 is wrong for $\beta > 3.75$; avoid
-  it for teaching material.
 
 ## References
 
