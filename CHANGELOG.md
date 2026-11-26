@@ -609,6 +609,15 @@ odd-length spectral bin spacing, `frequency_to_note` and
   `AudioSampleError::Layout` error, with the buffer reset to zeros, if it changed the size.
   `into_inner` returns the `AudioSamples`. `FixedSizeAudioSamples::from_1d` returns an
   error unless the slice holds exactly `N` samples (it accepted any length).
+- **`StereoAudioSamples` always has two channels.** Its field is private and it no longer
+  implements `DerefMut` or `AsMut`, through which an in-place operation (`to_mono_in_place`,
+  or assigning other audio) could leave a `StereoAudioSamples` with one channel or more than
+  two. It still dereferences to `AudioSamples` for reading. Samples are written by indexing
+  (`stereo[(channel, i)]`), `view_mut`, `as_slice_mut`, `apply` and `copy_from`; `modify`
+  runs any in-place `AudioSamples` operation and returns an `AudioSampleError::Layout`
+  error, with the buffer reset to two channels of zeros, if it left anything other than
+  stereo audio (a length change is allowed). `samples` borrows and `into_inner` returns the
+  `AudioSamples`, replacing `stereo.0`.
 - **Onset peak-picking presets are specified in seconds and take the sample rate.**
   `PeakPickingConfig::music`, `speech` and `drums` used lengths sized as audio samples (a
   2048-frame threshold window and a 1024-frame separation for `music`), which on an onset

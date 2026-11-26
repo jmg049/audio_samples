@@ -15,7 +15,7 @@ use non_empty_iter::{IntoNonEmptyIterator, NonEmptyIterator};
 use non_empty_slice::{NonEmptyByteVec, NonEmptyBytes, NonEmptySlice, NonEmptyVec};
 use std::any::TypeId;
 use std::num::NonZeroU8;
-use std::ops::{Bound, Deref, DerefMut, Index, IndexMut, Mul, Neg, RangeBounds};
+use std::ops::{Bound, Deref, Index, IndexMut, Mul, Neg, RangeBounds};
 
 /// Creates a [`NonZeroU32`] sample rate from a compile-time constant.
 ///
@@ -5982,7 +5982,14 @@ where
 /// ## Intended Usage
 ///
 /// Construct via [`StereoAudioSamples::new`] or [`TryFrom<AudioSamples>`]. The inner
-/// [`AudioSamples`] is accessible through `Deref` / `DerefMut` / `AsRef` / `AsMut`.
+/// [`AudioSamples`] is readable through `Deref` and `AsRef`, so every operation that
+/// takes `&self` is available. Mutable access cannot change the channel count:
+/// indexing (`stereo[(channel, frame)]`), [`view_mut`](Self::view_mut),
+/// [`as_slice_mut`](Self::as_slice_mut), [`apply`](Self::apply) and
+/// [`copy_from`](Self::copy_from) write samples in place, and
+/// [`modify`](Self::modify) runs any in-place `AudioSamples` operation and checks
+/// that the audio is still stereo afterwards. [`into_inner`](Self::into_inner)
+/// returns the `AudioSamples`.
 ///
 /// ## Invariants
 ///
@@ -5991,10 +5998,40 @@ where
 ///
 /// ## Assumptions
 ///
-/// All constructors reject non-stereo input at runtime; there is no way to construct
-/// a `StereoAudioSamples` with fewer or more than two channels through the public API.
-#[non_exhaustive]
-pub struct StereoAudioSamples<'a, T>(pub AudioSamples<'a, T>)
+/// All constructors reject non-stereo input at runtime, and no method leaves the
+/// buffer with fewer or more than two channels.
+///
+/// # Examples
+///
+/// ```rust
+/// use audio_samples::{AudioSamples, StereoAudioSamples, sample_rate};
+/// use ndarray::array;
+///
+/// let audio = AudioSamples::new_multi_channel(
+///     array![[0.1f32, 0.2, 0.3], [0.4, 0.5, 0.6]], sample_rate!(44100)).unwrap();
+/// let mut stereo = StereoAudioSamples::try_from(audio).unwrap();
+///
+/// stereo[(1, 0)] = 1.0;
+/// stereo.apply(|x| x * 0.5);
+/// assert_eq!(stereo[(1, 0)], 0.5);
+/// assert_eq!(stereo.num_channels().get(), 2);
+/// ```
+///
+/// The inner `AudioSamples` is not reachable mutably, so an in-place operation that
+/// changes the channel count cannot be applied:
+///
+/// ```rust,compile_fail,E0596
+/// use audio_samples::{AudioSamples, StereoAudioSamples, nzu, sample_rate};
+/// use ndarray::array;
+///
+/// let audio = AudioSamples::new_multi_channel(
+///     array![[0.1f32, 0.2], [0.3, 0.4]], sample_rate!(44100)).unwrap();
+/// let mut stereo = StereoAudioSamples::try_from(audio).unwrap();
+/// // `StereoAudioSamples` dereferences to `AudioSamples` for reading only: this does not compile.
+/// let inner: &mut AudioSamples<'static, f32> = &mut stereo;
+/// *inner = AudioSamples::zeros_mono(nzu!(2), sample_rate!(44100));
+/// ```
+pub struct StereoAudioSamples<'a, T>(AudioSamples<'a, T>)
 where
     T: StandardSample;
 
@@ -6092,6 +6129,160 @@ where
     }
 }
 
+/// Error for audio whose shape differs from a stereo buffer's.
+fn stereo_shape_error(
+    operation: &str,
+    expected_frames: usize,
+    actual: (usize, usize),
+) -> AudioSampleError {
+    AudioSampleError::Layout(LayoutError::dimension_mismatch(
+        format!("(2, {expected_frames})"),
+        format!("({}, {})", actual.0, actual.1),
+        operation,
+    ))
+}
+
+/// `(channels, frames)` of `audio`.
+fn channels_and_frames<T: StandardSample>(audio: &AudioSamples<'_, T>) -> (usize, usize) {
+    (
+        audio.num_channels().get() as usize,
+        audio.samples_per_channel().get(),
+    )
+}
+
+impl<'a, T> StereoAudioSamples<'a, T>
+where
+    T: StandardSample,
+{
+    /// Returns a reference to the inner [`AudioSamples`].
+    #[inline]
+    #[must_use]
+    pub const fn samples(&self) -> &AudioSamples<'a, T> {
+        &self.0
+    }
+
+    /// Consumes the buffer and returns the inner [`AudioSamples`].
+    #[inline]
+    #[must_use]
+    pub fn into_inner(self) -> AudioSamples<'a, T> {
+        self.0
+    }
+
+    /// A mutable `(2, frames)` view of the samples (channels by frames).
+    ///
+    /// If the samples are immutably borrowed, they are copied into owned storage first.
+    #[inline]
+    pub fn view_mut(&mut self) -> ArrayViewMut2<'_, T> {
+        match self.0.as_multi_channel_mut() {
+            Some(multi) => multi.view_mut(),
+            // The constructors make multi-channel data and `modify` keeps it so.
+            None => unreachable!("StereoAudioSamples holds multi-channel data"),
+        }
+    }
+
+    /// A mutable slice of the samples in planar order (all of the left channel, then the
+    /// right channel), or `None` if the storage is not contiguous.
+    #[inline]
+    pub fn as_slice_mut(&mut self) -> Option<&mut [T]> {
+        self.0.as_slice_mut()
+    }
+
+    /// Replaces each sample `x` with `f(x)`.
+    #[inline]
+    pub fn apply<F>(&mut self, f: F)
+    where
+        F: Fn(T) -> T,
+    {
+        self.0.apply(f);
+    }
+
+    /// Copies the samples of `source`, which must have 2 channels of the same length as
+    /// this buffer, into this buffer. The sample rate is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioSampleError::Layout`] if `source` has another shape; the buffer is
+    /// then unchanged.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::{AudioSamples, StereoAudioSamples, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_multi_channel(
+    ///     array![[0.0f32, 0.0], [0.0, 0.0]], sample_rate!(8000)).unwrap();
+    /// let mut stereo = StereoAudioSamples::try_from(audio).unwrap();
+    ///
+    /// let source = AudioSamples::new_multi_channel(
+    ///     array![[1.0f32, 2.0], [3.0, 4.0]], sample_rate!(8000)).unwrap();
+    /// stereo.copy_from(&source).unwrap();
+    /// assert_eq!(stereo[(1, 1)], 4.0);
+    ///
+    /// let longer = AudioSamples::new_multi_channel(
+    ///     array![[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0]], sample_rate!(8000)).unwrap();
+    /// assert!(stereo.copy_from(&longer).is_err());
+    /// ```
+    #[inline]
+    pub fn copy_from(&mut self, source: &AudioSamples<'_, T>) -> AudioSampleResult<()> {
+        let frames = self.0.samples_per_channel().get();
+        let actual = channels_and_frames(source);
+        let src = match source.as_multi_channel() {
+            Some(multi) if actual == (2, frames) => multi.view(),
+            _ => return Err(stereo_shape_error("copy_from", frames, actual)),
+        };
+        self.view_mut().assign(&src);
+        Ok(())
+    }
+
+    /// Runs `f` with mutable access to the inner [`AudioSamples`], for in-place operations
+    /// that keep two channels (gain, filtering, normalisation, fades, trimming, ...). The
+    /// length may change.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioSampleError::Layout`] if `f` left anything other than two channels in
+    /// multi-channel layout. The buffer is then reset to two channels of zeros, with the
+    /// length it had before `f` ran and the sample rate `f` left, so it is still stereo.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use audio_samples::{AudioSamples, StereoAudioSamples, nzu, sample_rate};
+    /// use ndarray::array;
+    ///
+    /// let audio = AudioSamples::new_multi_channel(
+    ///     array![[0.25f32, 0.5], [0.75, 1.0]], sample_rate!(8000)).unwrap();
+    /// let mut stereo = StereoAudioSamples::try_from(audio).unwrap();
+    ///
+    /// stereo.modify(|audio| audio.apply(|x| x * 2.0)).unwrap();
+    /// assert_eq!(stereo[(0, 0)], 0.5);
+    ///
+    /// // An in-place operation that leaves one channel is an error.
+    /// let mono = stereo.modify(|audio| {
+    ///     *audio = AudioSamples::zeros_mono(nzu!(2), sample_rate!(8000));
+    /// });
+    /// assert!(mono.is_err());
+    /// assert_eq!(stereo.num_channels().get(), 2);
+    /// ```
+    #[inline]
+    pub fn modify<R, F>(&mut self, f: F) -> AudioSampleResult<R>
+    where
+        F: FnOnce(&mut AudioSamples<'a, T>) -> R,
+    {
+        let frames = self.0.samples_per_channel();
+        let out = f(&mut self.0);
+        let actual = channels_and_frames(&self.0);
+        if self.0.is_multi_channel() && actual.0 == 2 {
+            Ok(out)
+        } else {
+            let sample_rate = self.0.sample_rate();
+            self.0 = AudioSamples::zeros_multi(channels!(2), frames, sample_rate);
+            Err(stereo_shape_error("modify", frames.get(), actual))
+        }
+    }
+}
+
 /// Provides transparent read access to the inner [`AudioSamples`].
 impl<'a, T> Deref for StereoAudioSamples<'a, T>
 where
@@ -6102,20 +6293,6 @@ where
     #[inline]
     fn deref(&self) -> &Self::Target {
         &self.0
-    }
-}
-
-/// Provides transparent write access to the inner [`AudioSamples`].
-///
-/// Note: mutating the inner `AudioSamples` (e.g. via `replace_data`) can potentially
-/// violate the stereo invariant. Prefer using [`StereoAudioSamples`] methods directly.
-impl<T> DerefMut for StereoAudioSamples<'_, T>
-where
-    T: StandardSample,
-{
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
     }
 }
 
@@ -6130,14 +6307,35 @@ where
     }
 }
 
-/// Provides a mutable reference to the inner [`AudioSamples`].
-impl<'a, T> AsMut<AudioSamples<'a, T>> for StereoAudioSamples<'a, T>
+impl<T> Index<(usize, usize)> for StereoAudioSamples<'_, T>
 where
     T: StandardSample,
 {
+    type Output = T;
+
+    /// The sample at `(channel, frame)`.
+    ///
+    /// # Panics
+    ///
+    /// If `channel >= 2` or `frame` is out of bounds, as for slices.
     #[inline]
-    fn as_mut(&mut self) -> &mut AudioSamples<'a, T> {
-        &mut self.0
+    fn index(&self, index: (usize, usize)) -> &T {
+        &self.0[index]
+    }
+}
+
+impl<T> IndexMut<(usize, usize)> for StereoAudioSamples<'_, T>
+where
+    T: StandardSample,
+{
+    /// The sample at `(channel, frame)`.
+    ///
+    /// # Panics
+    ///
+    /// If `channel >= 2` or `frame` is out of bounds, as for slices.
+    #[inline]
+    fn index_mut(&mut self, index: (usize, usize)) -> &mut T {
+        &mut self.0[index]
     }
 }
 
@@ -6190,6 +6388,102 @@ mod tests {
     use super::*;
     use ndarray::{ArrayBase, array};
     use non_empty_slice::non_empty_vec;
+
+    fn stereo_of(data: Array2<f32>) -> StereoAudioSamples<'static, f32> {
+        let audio = AudioSamples::new_multi_channel(data, sample_rate!(8000)).unwrap();
+        StereoAudioSamples::try_from(audio).unwrap()
+    }
+
+    #[test]
+    fn stereo_modify_rejects_a_channel_count_change() {
+        let mut stereo = stereo_of(array![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]);
+        stereo.modify(|a| a.apply(|x| x * 2.0)).unwrap();
+        assert_eq!(stereo[(1, 2)], 12.0);
+
+        // A length change keeps two channels and is allowed.
+        stereo
+            .modify(|a| a.replace_with_multi(array![[1.0, 2.0], [3.0, 4.0]]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stereo.samples_per_channel().get(), 2);
+
+        // Leaving mono audio is an error, and the buffer is two channels of zeros with
+        // the previous length.
+        let err = stereo.modify(|a| *a = AudioSamples::zeros_mono(nzu!(5), sample_rate!(8000)));
+        assert!(matches!(err, Err(AudioSampleError::Layout(_))));
+        assert_eq!(stereo.num_channels().get(), 2);
+        assert!(stereo.is_multi_channel());
+        assert_eq!(stereo.samples_per_channel().get(), 2);
+        assert_eq!(stereo.sample_rate(), sample_rate!(8000));
+        assert!(stereo.to_interleaved_vec().iter().all(|&x| x == 0.0));
+
+        // Three channels are an error too.
+        let err = stereo.modify(|a| {
+            *a = AudioSamples::zeros_multi(channels!(3), nzu!(4), sample_rate!(8000));
+        });
+        assert!(err.is_err());
+        assert_eq!(stereo.num_channels().get(), 2);
+
+        // One channel in multi-channel layout is not stereo either.
+        let err = stereo.modify(|a| {
+            *a = AudioSamples::zeros_multi(channels!(1), nzu!(4), sample_rate!(8000));
+        });
+        assert!(err.is_err());
+        assert_eq!(stereo.num_channels().get(), 2);
+    }
+
+    #[test]
+    fn stereo_copy_from_checks_the_shape() {
+        let mut stereo = stereo_of(Array2::zeros((2, 3)));
+        let source =
+            AudioSamples::new_multi_channel(Array2::from_elem((2, 3), 0.5f32), sample_rate!(8000))
+                .unwrap();
+        stereo.copy_from(&source).unwrap();
+        assert!(stereo.to_interleaved_vec().iter().all(|&x| x == 0.5));
+
+        let longer =
+            AudioSamples::new_multi_channel(Array2::from_elem((2, 4), 1.0f32), sample_rate!(8000))
+                .unwrap();
+        let mono =
+            AudioSamples::new_mono(Array1::from_elem(3, 1.0f32), sample_rate!(8000)).unwrap();
+        let three =
+            AudioSamples::new_multi_channel(Array2::from_elem((3, 3), 1.0f32), sample_rate!(8000))
+                .unwrap();
+        for wrong in [&longer, &mono, &three] {
+            assert!(matches!(
+                stereo.copy_from(wrong),
+                Err(AudioSampleError::Layout(_))
+            ));
+        }
+        assert!(stereo.to_interleaved_vec().iter().all(|&x| x == 0.5));
+    }
+
+    #[test]
+    fn stereo_sample_writes_keep_two_channels() {
+        let mut stereo = stereo_of(array![[1.0, 2.0], [3.0, 4.0]]);
+        stereo[(0, 1)] = 9.0;
+        stereo.view_mut()[[1, 0]] = 7.0;
+        stereo.as_slice_mut().unwrap()[0] = -1.0;
+        assert_eq!(stereo[(0, 0)], -1.0);
+        assert_eq!(stereo[(0, 1)], 9.0);
+        assert_eq!(stereo[(1, 0)], 7.0);
+        stereo.apply(|x| x + 1.0);
+        assert_eq!(stereo[(1, 1)], 5.0);
+        let inner = stereo.into_inner();
+        assert_eq!(inner.num_channels().get(), 2);
+        assert_eq!(inner[(1, 1)], 5.0);
+    }
+
+    #[test]
+    fn stereo_view_mut_on_borrowed_data_copies_it() {
+        let data = array![[1.0f32, 2.0], [3.0, 4.0]];
+        let multi = MultiData::from_view(data.view()).unwrap();
+        let mut stereo =
+            StereoAudioSamples::new(AudioData::Multi(multi), sample_rate!(8000)).unwrap();
+        stereo.view_mut()[[0, 0]] = 10.0;
+        assert_eq!(stereo[(0, 0)], 10.0);
+        assert_eq!(data[[0, 0]], 1.0);
+    }
 
     #[test]
     fn test_sample_type_from_str_round_trip() {
