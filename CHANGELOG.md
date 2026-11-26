@@ -680,18 +680,50 @@ odd-length spectral bin spacing, `frequency_to_note` and
   the frame (`spectrograms` 2.2.0) the default configuration reports clean onsets within one hop
   (11.6 ms at 44.1 kHz), mostly in the frame just before the onset; they were reported about
   30 ms early.
-- `OnsetDetectionConfig::percussive` zeroes the detection function below twice a 5-frame
-  running median (was 3 frames). Over 3 frames that removed every hit whose peak is split
-  between two adjacent frames; on an eight-click track it found 5 to 7 clicks, now all 8.
-- `SpectralFluxConfig::percussive` compresses the flux with `ln(1 + 10·x)` (was 1000). With the
-  kernels centred, the low bins start to respond about a quarter of the analysis window before
-  a hit, and strong compression made that early rise a peak of its own, so every hit was
-  reported twice.
-- `complex_onset_detection` and `detect_onsets_spectral_flux` with
-  `SpectralFluxMethod::Complex` or `RectifiedComplex` report the time each
-  `constant_q_transform` frame describes, `(i·H + N/2)/f_s` with `N = min(signal_len, 16384)`
-  (they reported `i·H/f_s`, about 0.19 s early for any signal of 16384 samples or more at
-  44.1 kHz).
+- **The peak picker no longer pre-emphasises by default.** `PeakPickingConfig::default()` and
+  the `music`, `speech` and `drums` presets set `pre_emphasis` to `false` (their coefficients
+  are kept for when it is switched on). Pre-emphasis `o[i] − α·o[i−1]` on a detection function,
+  itself a difference of spectra, moves every peak to the frame where it rises fastest: after
+  log compression the first frame above the floor. `SpectralFluxConfig::musical` reported clicks
+  29 to 32 ms early and `OnsetDetectionConfig::musical` found 5 of 8 clicks; both now find all 8
+  within one hop.
+- **The onset presets do not log-compress.** `SpectralFluxConfig::{percussive, musical,
+  complex}` and every `ComplexOnsetConfig` preset set `log_compression` to 0 (was 10, 100,
+  100 and 1000, 100, 50, 100). The detection function is in the units of the spectrogram, so
+  `ln(1 + C·x)` depends on the signal level, and it lifted the ripple between onsets past the
+  peak picker's floor: on a melody the complex default reported 11 onsets for 6 notes.
+- `OnsetDetectionConfig::{percussive, musical, speech}` set the running median of their
+  adaptive threshold in seconds (0.1 s, 80 ms and 50 ms) and convert it to frames at the
+  sample rate and hop, as the peak-picking lengths are. The percussive preset's fixed 5 frames
+  spanned 29 ms at 44.1 kHz, shorter than an onset's peak in the detection function, so the
+  twice-the-median threshold removed sharp tonal notes (0 of 8 found); it finds all 8 at
+  22.05, 44.1 and 48 kHz. The musical and speech lengths are unchanged at 44.1 kHz.
+- `SpectralFluxConfig::musical` uses `SpectralFluxMethod::Energy`, the rectified flux (was
+  `Magnitude`, which counts decays and delayed onsets at 22.05 kHz by 25 to 31 ms).
+  `SpectralFluxConfig::complex` uses `SpectralFluxMethod::RectifiedComplex` (was `Complex`).
+- **The complex-domain onset detectors work.** On a four-click track
+  `complex_onset_detection` found one click; every `ComplexOnsetConfig` preset and
+  `SpectralFluxConfig::complex` now find all clicks of a click track within one hop and all
+  notes of a melody within 30 ms, at 22.05, 44.1 and 48 kHz. The changes:
+  - They compute the CQT on centred frames of `window_size` samples
+    (new `onset::complex::cqt_frames`, whose moduli equal `cqt_magnitude_spectrogram`), like
+    the energy detectors, instead of `constant_q_transform`'s uncentred frames of
+    `min(signal_len, 16384)` samples. `window_size` is honoured, frame `t` is reported at
+    `t·H/f_s`, and onsets in the first and last 0.19 s of a signal are no longer lost.
+  - The presets use `onset_cqt_params()` (Q 34.1) instead of `CqtParams::onset_detection()`
+    (Q 0.5, half-period kernels with which every detection function found 3 to 5 of 8 clicks).
+  - The phase term of `onset_detection_function_complex` is the magnitude-weighted
+    second-difference phase deviation of Dixon (2006), new
+    `onset::complex::weighted_phase_deviation`, and `phase_deviation_matrix` returns it. The
+    unweighted deviation from each bin's centre frequency (`complex::phase_deviation`, still
+    available) is non-zero for every steady tone off a bin centre and in every silent bin, so
+    on sparse material it swamped the onsets.
+  - `flux::complex_flux` (`SpectralFluxMethod::Complex`) computes the complex-domain function
+    of Duxbury et al. (2003) and Bello et al. (2004), `Σ|X[t] − X̂[t]|` with the prediction
+    `X̂` keeping the previous magnitude and phase advance, and `flux::rectified_complex_flux`
+    (`RectifiedComplex`) its rectified form (Dixon, 2006). They computed `Σ|X[t] − X[t−1]|`,
+    which is non-zero for any steady tone, and a copy of the energy flux. Both are zero for
+    the first two frames.
 - `note_to_midi` (and so `note_to_frequency`) accepts a wider note grammar: lowercase letters, any run of `#` `♯` `b` `!` `♭` `𝄪` `𝄫` `♮` accidentals (B#3 = 60, Cb4 = 59, double accidentals), signed octaves (`C-1` = 0) and a cents suffix rounded half to even (`A4+50` = 70). The octave remains required and the result remains a `u8` in `0..=127`.
 - `BeatTrackingData::beat_times` / `track_beats_core` are now sorted chronologically and de-duplicated (they were in detection order). `BeatTrackingData::tempo_bpm` is documented as the requested tempo (it is not estimated); its `Display` prints "Tempo:".
 - `resampling` feature: Medium/High/Fast downsampling take 2-3x longer than before for the same ratio, because their anti-aliasing filters are longer and now correct.
@@ -725,13 +757,6 @@ odd-length spectral bin spacing, `frequency_to_note` and
 - A mel spectrogram's `frequencies()` axis ignores `f_min`/`f_max`; it is
   correct only for the range 0 Hz to Nyquist. This is inherited from the
   `spectrograms` crate (2.2.0).
-- The complex-domain onset detection function (`onset_detection_function_complex`,
-  `complex_onset_detection`) weights the phase deviation of every CQT bin equally, however
-  quiet. In silence every bin deviates by its full expected phase advance, so on sparse
-  material such as a click track the phase term dominates: the function is nearly constant
-  and dips at the onsets. Its frames are also `min(signal_len, 16384)` samples long whatever
-  `ComplexOnsetConfig::window_size` says. Use `detect_onsets` or
-  `AudioRhythm::onset_detect` for such material.
 
 ## 2.0.0
 

@@ -7,10 +7,11 @@
 //!   spectral flux
 //! - **Magnitude flux** ([`magnitude_flux`]): `Σ_b |X[b,t] − X[b,t−1]|` (absolute, not
 //!   rectified: decreases count too)
-//! - **Complex flux** ([`complex_flux`]): `Σ_b |X[b,t] − X[b,t−1]|` on complex values, so phase
-//!   changes contribute
-//! - **Rectified complex flux** ([`rectified_complex_flux`]): `Σ_b max(0, |X[b,t]| − |X[b,t−1]|)`;
-//!   phase is discarded, so it equals energy flux on `|X|`
+//! - **Complex-domain flux** ([`complex_flux`]): `Σ_b |X[b,t] − X̂[b,t]|`, the distance from a
+//!   prediction `X̂` that keeps the previous magnitude and the previous phase advance, so steady
+//!   tones give nothing and both level and phase changes count
+//! - **Rectified complex-domain flux** ([`rectified_complex_flux`]): the same sum over the bins
+//!   whose magnitude has not fallen, so note offsets do not count
 //!
 //! All flux functions operate on 2D spectrograms with shape `(frequency_bins, frames)` and
 //! return a 1D time series of flux values, one per frame. The first frame always has zero flux.
@@ -117,65 +118,64 @@ pub fn magnitude_flux(mag: &Array2<f64>) -> NonEmptyVec<f64> {
     unsafe { NonEmptyVec::new_unchecked(flux) }
 }
 
-/// Computes complex domain spectral flux using magnitude and phase.
+/// Computes the complex-domain onset detection function (Duxbury et al., 2003; Bello et
+/// al., 2004).
 ///
-/// Calculates the sum over bins of the distance between consecutive complex values:
-/// `flux[t] = Σ_b |X[b,t] − X[b,t−1]|`, where X is complex-valued (an L1 sum of per-bin
-/// moduli, not a Euclidean norm over bins). Because a stationary sinusoid's phase advances
-/// each frame, even a steady tone gives non-zero complex flux.
+/// Each bin is predicted from the two previous frames as a stationary sinusoid: the
+/// magnitude of frame `t−1` and the phase advanced by the previous frame-to-frame advance,
+/// `X̂[b,t] = |X[b,t−1]|·e^{i(2φ[b,t−1] − φ[b,t−2])}`. The flux is the sum over bins of the
+/// distance from the prediction:
 ///
-/// Complex flux incorporates both magnitude and phase changes, providing the most complete
-/// measure of spectral change. More computationally expensive but most accurate for
-/// polyphonic music with complex timbres.
+/// ```text
+/// flux[t] = Σ_b |X[b,t] − X̂[b,t]|
+/// ```
+///
+/// A steady tone at any frequency gives zero; a change of level or of phase advance (a new
+/// note, a hit, a change of pitch) does not. Decays also count; use
+/// [`rectified_complex_flux`] to count only bins whose level has not fallen.
 ///
 /// # Arguments
 ///
-/// * `spec` - 2D complex spectrogram with shape `(frequency_bins, frames)`
+/// * `spec` - 2D complex spectrogram with shape `(frequency_bins, frames)`, for example
+///   from [`cqt_frames`](super::complex::cqt_frames)
 ///
 /// # Returns
 ///
-/// Flux values for each frame. The first frame is always 0.0 (no previous frame to compare).
+/// Flux values for each frame. The first two frames are 0.0 (the prediction needs two
+/// previous frames).
 ///
 /// # Example
 ///
 /// ```rust
-/// use ndarray::array;
+/// use ndarray::Array2;
 /// use num_complex::Complex;
 /// use audio_samples::operations::onset::flux::complex_flux;
 ///
-/// // One bin whose phase turns by 90° between frames at constant magnitude.
-/// let spec = array![[Complex::new(1.0, 0.0), Complex::new(0.0, 1.0)]];
+/// // One bin turning by 0.7 rad per frame at constant magnitude: perfectly predicted.
+/// let mut spec = Array2::from_shape_fn((1, 6), |(_, t)| Complex::from_polar(1.0, 0.7 * t as f64));
+/// assert!(complex_flux(&spec).iter().all(|&v| v.abs() < 1e-12));
+///
+/// // The magnitude doubles at frame 4: the flux there is |2 − 1| = 1.
+/// for t in 4..6 {
+///     spec[[0, t]] *= 2.0;
+/// }
 /// let flux = complex_flux(&spec);
-/// assert_eq!(flux[0], 0.0);
-/// assert!((flux[1] - 2f64.sqrt()).abs() < 1e-12); // |i − 1|
+/// assert!((flux[4] - 1.0).abs() < 1e-12);
 /// ```
 #[inline]
 #[must_use]
 pub fn complex_flux(spec: &Array2<Complex<f64>>) -> NonEmptyVec<f64> {
-    let (bins, frames) = spec.dim();
-    let mut flux = Vec::with_capacity(frames);
-    flux.push(0.0);
-
-    for t in 1..frames {
-        let mut acc = 0.0;
-        for b in 0..bins {
-            let diff = spec[[b, t]] - spec[[b, t - 1]];
-            acc += diff.norm();
-        }
-        flux.push(acc);
-    }
-    // safety: frames > 1 ensures flux is non-empty
-
-    unsafe { NonEmptyVec::new_unchecked(flux) }
+    complex_domain(spec, false)
 }
 
-/// Computes rectified complex domain spectral flux.
+/// Computes the rectified complex-domain onset detection function (Dixon, 2006).
 ///
-/// Calculates the sum of positive magnitude differences:
-/// `flux[t] = Σ_b max(0, |X[b,t]| − |X[b,t−1]|)`.
+/// The sum of [`complex_flux`] taken only over the bins whose magnitude has not fallen,
+/// `|X[b,t]| ≥ |X[b,t−1]|`, so a decaying note contributes nothing and only onsets remain:
 ///
-/// Only the moduli |X| are used; phase is discarded. The result is numerically identical to
-/// [`energy_flux`] applied to `|X|` (half-wave-rectified magnitude flux).
+/// ```text
+/// flux[t] = Σ_{b : |X[b,t]| ≥ |X[b,t−1]|} |X[b,t] − X̂[b,t]|
+/// ```
 ///
 /// # Arguments
 ///
@@ -183,39 +183,46 @@ pub fn complex_flux(spec: &Array2<Complex<f64>>) -> NonEmptyVec<f64> {
 ///
 /// # Returns
 ///
-/// Flux values for each frame. The first frame is always 0.0 (no previous frame to compare).
+/// Flux values for each frame. The first two frames are 0.0.
 ///
 /// # Example
 ///
 /// ```rust
-/// use ndarray::array;
+/// use ndarray::Array2;
 /// use num_complex::Complex;
-/// use audio_samples::operations::onset::flux::rectified_complex_flux;
+/// use audio_samples::operations::onset::flux::{complex_flux, rectified_complex_flux};
 ///
-/// // A phase change at constant magnitude does not count; a magnitude rise does.
-/// let spec = array![[Complex::new(1.0, 0.0), Complex::new(0.0, 1.0), Complex::new(0.0, 3.0)]];
-/// let flux = rectified_complex_flux(&spec);
-/// assert_eq!(flux.as_slice(), &[0.0, 0.0, 2.0]);
+/// // A tone that halves in level at frame 3 and doubles back at frame 5.
+/// let spec = Array2::from_shape_fn((1, 7), |(_, t)| {
+///     let level = if (3..5).contains(&t) { 0.5 } else { 1.0 };
+///     Complex::from_polar(level, 0.4 * t as f64)
+/// });
+/// let full = complex_flux(&spec);
+/// let rectified = rectified_complex_flux(&spec);
+/// assert!(full[3] > 0.4 && rectified[3] == 0.0); // the drop counts only in the full flux
+/// assert!((rectified[5] - full[5]).abs() < 1e-12); // the rise counts in both
 /// ```
 #[inline]
 #[must_use]
 pub fn rectified_complex_flux(spec: &Array2<Complex<f64>>) -> NonEmptyVec<f64> {
-    let (bins, frames) = spec.dim();
-    let mut flux = Vec::with_capacity(frames);
-    flux.push(0.0);
+    complex_domain(spec, true)
+}
 
-    for t in 1..frames {
-        let mut acc = 0.0;
-        for b in 0..bins {
-            let diff = spec[[b, t]].norm() - spec[[b, t - 1]].norm();
-            if diff > 0.0 {
-                acc += diff;
+/// The complex-domain sum `Σ_b |X[b,t] − X̂[b,t]|`, over every bin or, if `rectify`, over
+/// the bins whose magnitude has not fallen.
+fn complex_domain(spec: &Array2<Complex<f64>>, rectify: bool) -> NonEmptyVec<f64> {
+    let frames = spec.ncols();
+    let mut flux = vec![0.0; frames.max(1)];
+    for row in spec.rows() {
+        for t in 2..frames {
+            let (now, prev, prev2) = (row[t], row[t - 1], row[t - 2]);
+            if rectify && now.norm() < prev.norm() {
+                continue;
             }
+            let predicted = Complex::from_polar(prev.norm(), 2.0 * prev.arg() - prev2.arg());
+            flux[t] += (now - predicted).norm();
         }
-        flux.push(acc);
     }
-
-    // safety: frames > 1 ensures flux is non-empty
-
+    // safety: `flux` has at least one element
     unsafe { NonEmptyVec::new_unchecked(flux) }
 }

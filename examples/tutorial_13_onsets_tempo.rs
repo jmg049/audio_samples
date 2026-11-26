@@ -67,35 +67,17 @@ fn sensitive() -> OnsetDetectionConfig {
     c
 }
 
-/// Pre-emphasis y[i] = x[i] - c x[i-1] (first value unchanged), then
-/// normalisation by the maximum absolute value: the ODF the threshold is applied to.
-fn pre_emphasised(odf: &[f64], c: f64) -> Vec<f64> {
-    let y: Vec<f64> = (0..odf.len())
-        .map(|i| {
-            if i == 0 {
-                odf[0]
-            } else {
-                c.mul_add(-odf[i - 1], odf[i])
-            }
-        })
-        .collect();
-    let max = y.iter().fold(0.0f64, |m, v| m.max(v.abs()));
-    y.iter().map(|v| v / max).collect()
+/// Normalisation by the maximum absolute value: the ODF the threshold is applied to.
+fn normalised(odf: &[f64]) -> Vec<f64> {
+    let max = odf.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    odf.iter().map(|v| v / max).collect()
 }
 
-/// Peak picking as implemented, for a config with pre-emphasis and no median:
-/// pre-emphasise and peak-normalise, threshold = clamp(local max over +-w/2 -
-/// delta, floor, 1), strict local maxima above it, then strongest-first
-/// minimum separation.
-fn my_pick_peaks(
-    odf: &[f64],
-    pre_coeff: f64,
-    window: usize,
-    delta: f64,
-    floor: f64,
-    sep: usize,
-) -> Vec<usize> {
-    let o = pre_emphasised(odf, pre_coeff);
+/// Peak picking as implemented, for a config without pre-emphasis or median:
+/// peak-normalise, threshold = clamp(local max over +-w/2 - delta, floor, 1),
+/// strict local maxima above it, then strongest-first minimum separation.
+fn my_pick_peaks(odf: &[f64], window: usize, delta: f64, floor: f64, sep: usize) -> Vec<usize> {
+    let o = normalised(odf);
     let half = window.min(o.len()).max(3) / 2;
     let mut cand: Vec<(usize, f64)> = (1..o.len() - 1)
         .filter(|&i| {
@@ -178,19 +160,16 @@ fn main() {
     }
     // Every reported time is a frame centre within one hop (11.61 ms) of its burst.
     assert!(errors_ms.iter().all(|e| e.abs() < 1000.0 * HOP / SR));
-    assert_eq!(
-        errors_ms,
-        vec![-6.2, -7.0, -7.7, -8.5, -9.3, 1.6, -10.8, 0.0]
-    );
+    assert_eq!(errors_ms, vec![-6.2, -7.0, -7.7, 3.1, 2.3, 1.6, 0.8, 0.0]);
     // 0.5 s is 43.07 frames; frames are 43 apart, so while the peak stays in the frame
     // before a burst the lead grows by 0.77 ms per burst.
     assert!((0.5 * SR / HOP - 43.07).abs() < 0.005);
     assert!((1000.0 * (0.5 - 43.0 * HOP / SR) - 0.77).abs() < 0.005);
-    // The threshold's input: the pre-emphasised, normalised ODF at each burst.
+    // The threshold's input: the normalised ODF at each burst.
     let (_, odf_default) = audio
         .onset_detection_function(&OnsetDetectionConfig::default())
         .expect("odf");
-    let seen = pre_emphasised(&odf_default, 0.97);
+    let seen = normalised(&odf_default);
     let burst_peaks: Vec<f64> = truth
         .iter()
         .map(|t| {
@@ -205,7 +184,7 @@ fn main() {
     println!("   normalised peaks per burst (the floor is 0.1): {rounded:?}");
     assert_eq!(
         rounded,
-        vec![0.020, 0.034, 0.024, 0.338, 0.486, 0.613, 0.657, 0.599]
+        vec![0.036, 0.033, 0.024, 0.333, 0.757, 0.794, 1.0, 0.884]
     );
     assert_eq!(burst_peaks.iter().filter(|&&h| h < 0.1).count(), 3);
 
@@ -221,7 +200,7 @@ fn main() {
         (
             "floor 0.01 + threshold window 1024 frames",
             |c| c.peak_picking.adaptive_threshold.window_size = 1024,
-            3,
+            1,
         ),
         (
             "floor 0.01 + min separation 512 frames",
@@ -229,8 +208,8 @@ fn main() {
             3,
         ),
         (
-            "floor 0.01 without pre-emphasis",
-            |c| c.peak_picking.pre_emphasis = false,
+            "floor 0.01 + pre-emphasis 0.97",
+            |c| c.peak_picking.pre_emphasis = true,
             8,
         ),
     ];
@@ -315,7 +294,7 @@ fn main() {
 
     // Same ODF for both configurations (they differ only in the floor).
     for (floor, expected) in [(0.1, &default_onsets), (0.01, &onsets)] {
-        let frames = my_pick_peaks(&odf_default, 0.97, 9, 0.07, floor, 3);
+        let frames = my_pick_peaks(&odf_default, 9, 0.07, floor, 3);
         let seconds: Vec<f64> = frames.iter().map(|&i| i as f64 * HOP / SR).collect();
         println!("   our peak picking, floor {floor}: frames {frames:?}");
         assert_eq!(&seconds, expected);

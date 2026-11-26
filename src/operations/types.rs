@@ -4649,7 +4649,13 @@ pub struct PeakPickingConfig {
 
     /// Whether to apply pre-emphasis (high-pass) filtering before detection.
     ///
-    /// Enhances transient content by attenuating slowly-varying components.
+    /// `y[i] = o[i] − α·o[i−1]` attenuates slowly varying components, but on an
+    /// onset strength function, which is already a difference of spectra, it
+    /// moves every peak to the frame where the strength rises fastest, which comes
+    /// before the onset. After log compression that is the first frame above the
+    /// floor, up to half an analysis window early, and a peak that rises over several
+    /// frames can end up below the threshold. The default and the presets leave
+    /// it off.
     pub pre_emphasis: bool,
 
     /// First-order high-pass coefficient for pre-emphasis, in `[0.0, 1.0]`.
@@ -4734,8 +4740,8 @@ impl PeakPickingConfig {
     ///
     /// Combined adaptive thresholding over a 0.2 s window (delta 0.03,
     /// percentile 0.85, floor 0.1 of the normalised strength), a minimum
-    /// separation of 0.1 s, pre-emphasis 0.95, no median filter and peak
-    /// normalisation.
+    /// separation of 0.1 s, no pre-emphasis (coefficient 0.95 when enabled), no
+    /// median filter and peak normalisation.
     ///
     /// The durations are converted to frames of the onset strength function at
     /// `sample_rate / hop_size` frames per second: the separation to the nearest
@@ -4747,7 +4753,8 @@ impl PeakPickingConfig {
     /// normalised strength, which rejects the low-level ripple between onsets,
     /// and none uses the median filter: its output has flat tops, which the
     /// strict local-maximum test rejects, and it deletes peaks narrower than
-    /// half its length.
+    /// half its length. None uses pre-emphasis either (see
+    /// [`pre_emphasis`](Self::pre_emphasis)).
     ///
     /// # Arguments
     ///
@@ -4775,7 +4782,7 @@ impl PeakPickingConfig {
         Self {
             adaptive_threshold,
             min_peak_separation: frames.nearest(0.1),
-            pre_emphasis: true,
+            pre_emphasis: false,
             pre_emphasis_coeff: 0.95,
             median_filter: false,
             median_filter_length: crate::nzu!(3),
@@ -4787,7 +4794,8 @@ impl PeakPickingConfig {
     /// A preset for syllable and word onsets in speech.
     ///
     /// Delta thresholding over a 0.2 s window (delta 0.07, floor 0.1), a minimum separation
-    /// of 80 ms, pre-emphasis 0.98, no median filter and peak normalisation.
+    /// of 80 ms, no pre-emphasis (coefficient 0.98 when enabled), no median filter and peak
+    /// normalisation.
     /// Durations are converted to frames as in [`music`](Self::music).
     ///
     /// # Arguments
@@ -4815,7 +4823,7 @@ impl PeakPickingConfig {
         Self {
             adaptive_threshold,
             min_peak_separation: frames.nearest(0.08),
-            pre_emphasis: true,
+            pre_emphasis: false,
             pre_emphasis_coeff: 0.98,
             median_filter: false,
             median_filter_length: crate::nzu!(3),
@@ -4827,8 +4835,8 @@ impl PeakPickingConfig {
     /// A preset for drum and other percussive onsets.
     ///
     /// Percentile thresholding over a 0.1 s window (percentile 0.95, floor 0.1), a minimum
-    /// separation of 30 ms, pre-emphasis 0.93, no median filter and peak
-    /// normalisation. Durations are converted to frames as in
+    /// separation of 30 ms, no pre-emphasis (coefficient 0.93 when enabled), no median
+    /// filter and peak normalisation. Durations are converted to frames as in
     /// [`music`](Self::music).
     ///
     /// # Arguments
@@ -4858,7 +4866,7 @@ impl PeakPickingConfig {
         Self {
             adaptive_threshold,
             min_peak_separation: frames.nearest(0.03),
-            pre_emphasis: true,
+            pre_emphasis: false,
             pre_emphasis_coeff: 0.93,
             median_filter: false,
             median_filter_length: crate::nzu!(3),
@@ -4961,7 +4969,8 @@ impl PeakPickingConfig {
 /// - an absolute floor of 0.1 on the peak-normalised strength (`min_threshold`),
 ///   which rejects the low-level ripple between onsets;
 /// - minimum separation of 3 frames;
-/// - pre-emphasis 0.97, no median filter, peak normalisation.
+/// - no pre-emphasis (coefficient 0.97 when enabled), no median filter, peak
+///   normalisation.
 ///
 /// There is no median filter because it erases single-frame peaks, and the
 /// threshold window and separation stay a few frames long: at hop 512, a few
@@ -4971,11 +4980,11 @@ impl PeakPickingConfig {
 /// every `hop_size` samples at `sample_rate`.
 #[cfg(feature = "peak-picking")]
 #[derive(Debug, Clone, Copy)]
-struct FrameRate(f64);
+pub(crate) struct FrameRate(f64);
 
 #[cfg(feature = "peak-picking")]
 impl FrameRate {
-    fn new(sample_rate: crate::repr::SampleRate, hop_size: NonZeroUsize) -> Self {
+    pub(crate) fn new(sample_rate: crate::repr::SampleRate, hop_size: NonZeroUsize) -> Self {
         Self(f64::from(sample_rate.get()) / hop_size.get() as f64)
     }
 
@@ -4987,7 +4996,7 @@ impl FrameRate {
 
     /// `seconds` in frames, rounded to the nearest odd count (at least one), for
     /// centred windows.
-    fn odd(self, seconds: f64) -> NonZeroUsize {
+    pub(crate) fn odd(self, seconds: f64) -> NonZeroUsize {
         // The nearest odd count, `2·round((x − 1)/2) + 1`, at least one.
         let half = ((seconds * self.0 - 1.0) / 2.0).round().max(0.0) as usize;
         NonZeroUsize::new(2 * half + 1).unwrap_or(NonZeroUsize::MIN)
@@ -5002,7 +5011,7 @@ impl Default for PeakPickingConfig {
         Self {
             adaptive_threshold,
             min_peak_separation: NonZeroUsize::new(3).expect("Must be non-zero"),
-            pre_emphasis: true,
+            pre_emphasis: false,
             pre_emphasis_coeff: 0.97,
             median_filter: false,
             median_filter_length: NonZeroUsize::new(3).expect("Must be non-zero"),

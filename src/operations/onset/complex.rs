@@ -1,14 +1,189 @@
 //! Complex-domain onset detection functions, which use both the magnitude and the
-//! phase of each CQT bin: magnitude differences between frames, the deviation of
-//! each bin's phase advance from that of its centre frequency, and their weighted
+//! phase of each CQT bin: the complex CQT on centred frames ([`cqt_frames`]),
+//! magnitude differences between frames, phase deviations, and their weighted
 //! combination ([`ComplexOnsetConfig`]). The
 //! [`AudioOnsetDetection`](crate::operations::traits::AudioOnsetDetection)
 //! methods call these; use them directly to build a custom detector.
 
+use std::num::NonZeroUsize;
+
 use super::ComplexOnsetConfig;
+use crate::{AudioSampleError, AudioSampleResult, ParameterError};
 use ndarray::{Array2, ArrayView2, Axis, s};
-use non_empty_slice::NonEmptyVec;
+use non_empty_slice::{NonEmptySlice, NonEmptyVec};
 use num_complex::Complex;
+use spectrograms::{CqtParams, make_window};
+
+/// A CQT kernel with its zero coefficients trimmed from both ends.
+struct TrimmedKernel {
+    /// Offset of the first kept coefficient from the start of the frame.
+    offset: usize,
+    /// The kept coefficients, already conjugated for correlation.
+    coefficients: Vec<Complex<f64>>,
+}
+
+/// Computes the complex CQT on centred frames, the complex counterpart of
+/// [`AudioTransforms::cqt_magnitude_spectrogram`](crate::AudioTransforms::cqt_magnitude_spectrogram).
+///
+/// The signal is zero-padded by `window_size / 2` samples at each end and cut into
+/// frames of `window_size` samples every `hop_size` samples, so frame `t` is centred on
+/// sample `t·hop_size` and describes time `t·hop_size / sample_rate`. There are
+/// `1 + (len + 2·(window_size/2) − window_size) / hop_size` frames (one if the padded
+/// signal is shorter than a frame). Bin `b` correlates the frame with a kernel of
+/// `min(round(Q·f_s/f_b), window_size)` samples centred in the frame: a complex
+/// exponential at the bin frequency f_b under `params.window`, with coefficients below
+/// `params.sparsity_threshold` of the kernel's peak set to zero and, if
+/// `params.normalize`, scaled to unit energy. Bins at or above the Nyquist frequency are
+/// left out. The moduli equal the CQT magnitude spectrogram with the same
+/// parameters, an STFT of `window_size` samples, the same hop and `centre = true`.
+///
+/// The kernel's phase reference moves with the frame, so a stationary sinusoid at f_b
+/// advances by `2π·f_b·hop_size/f_s` per frame.
+///
+/// # Arguments
+///
+/// * `samples` - The mono signal
+/// * `sample_rate` - Sample rate in Hz
+/// * `params` - CQT frequency range, resolution, window and kernel options
+/// * `window_size` - Frame length in samples; also the longest kernel
+/// * `hop_size` - Hop between frames in samples
+///
+/// # Returns
+///
+/// A `(bins, frames)` array of complex coefficients.
+///
+/// # Errors
+///
+/// [crate::AudioSampleError::Parameter] if `sample_rate` is not finite and positive or
+/// if no bin lies below the Nyquist frequency.
+///
+/// # Example
+///
+/// ```rust
+/// use audio_samples::nzu;
+/// use audio_samples::operations::onset::{complex::cqt_frames, onset_cqt_params};
+/// use non_empty_slice::NonEmptySlice;
+///
+/// let sr = 22_050.0;
+/// let tone: Vec<f64> = (0..22_050)
+///     .map(|i| (std::f64::consts::TAU * 440.0 * i as f64 / sr).sin())
+///     .collect();
+/// let samples = NonEmptySlice::from_slice(&tone).unwrap();
+/// let params = onset_cqt_params();
+/// let spec = cqt_frames(samples, sr, &params, nzu!(1603), nzu!(512)).unwrap();
+/// assert_eq!(spec.ncols(), 1 + (22_050 + 2 * 801 - 1603) / 512);
+/// // The strongest bin in a middle frame is the one at 440 Hz (A4, three octaves above 55 Hz).
+/// let column = spec.column(20);
+/// let loudest = (0..spec.nrows())
+///     .max_by(|&a, &b| column[a].norm().total_cmp(&column[b].norm()))
+///     .unwrap();
+/// assert_eq!(loudest, 72);
+/// ```
+#[inline]
+pub fn cqt_frames(
+    samples: &NonEmptySlice<f64>,
+    sample_rate: f64,
+    params: &CqtParams,
+    window_size: NonZeroUsize,
+    hop_size: NonZeroUsize,
+) -> AudioSampleResult<Array2<Complex<f64>>> {
+    if !(sample_rate.is_finite() && sample_rate > 0.0) {
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "sample_rate",
+            "Sample rate must be finite and positive",
+        )));
+    }
+    let n = window_size.get();
+    let nyquist = sample_rate / 2.0;
+
+    let mut kernels = Vec::with_capacity(params.num_bins().get());
+    for b in 0..params.num_bins().get() {
+        let f = params.bin_frequency(b);
+        if f >= nyquist {
+            break;
+        }
+        // `as usize` saturates; the minimum keeps the length within the frame.
+        let len = ((params.q_factor * sample_rate / f).round() as usize).clamp(1, n);
+        // safety: `len` is at least one
+        let window = make_window::<f64>(params.window.clone(), unsafe {
+            NonZeroUsize::new_unchecked(len)
+        });
+        let mut kernel: Vec<Complex<f64>> = window
+            .iter()
+            .enumerate()
+            .map(|(i, &w)| {
+                Complex::from_polar(w, std::f64::consts::TAU * f * i as f64 / sample_rate)
+            })
+            .collect();
+        let peak = kernel.iter().map(|c| c.norm()).fold(0.0, f64::max);
+        if params.sparsity_threshold > 0.0 && peak > 0.0 {
+            let floor = peak * params.sparsity_threshold;
+            for c in &mut kernel {
+                if c.norm() < floor {
+                    *c = Complex::new(0.0, 0.0);
+                }
+            }
+        }
+        if params.normalize {
+            let energy: f64 = kernel.iter().map(Complex::norm_sqr).sum();
+            if energy > 0.0 {
+                let scale = energy.sqrt().recip();
+                for c in &mut kernel {
+                    *c *= scale;
+                }
+            }
+        }
+        let zero = Complex::new(0.0, 0.0);
+        let first = kernel.iter().position(|&c| c != zero).unwrap_or(0);
+        let last = kernel.iter().rposition(|&c| c != zero).map_or(0, |i| i + 1);
+        kernels.push(TrimmedKernel {
+            offset: (n - len) / 2 + first,
+            coefficients: kernel[first..last.max(first)]
+                .iter()
+                .map(Complex::conj)
+                .collect(),
+        });
+    }
+    if kernels.is_empty() {
+        return Err(AudioSampleError::Parameter(ParameterError::invalid_value(
+            "cqt_params",
+            format!("No CQT bin lies below the Nyquist frequency {nyquist} Hz"),
+        )));
+    }
+
+    let x = samples.as_slice();
+    let pad = n / 2;
+    let padded_len = x.len() + 2 * pad;
+    let frames = if padded_len < n {
+        1
+    } else {
+        (padded_len - n) / hop_size.get() + 1
+    };
+
+    let mut out = Array2::from_elem((kernels.len(), frames), Complex::new(0.0, 0.0));
+    for t in 0..frames {
+        // Index of the frame's first sample in the unpadded signal.
+        let frame_start = (t * hop_size.get()) as isize - pad as isize;
+        for (b, kernel) in kernels.iter().enumerate() {
+            let start = frame_start + kernel.offset as isize;
+            // The part of the kernel that overlaps the signal.
+            let skip = usize::try_from(-start).unwrap_or(0);
+            let take = usize::try_from(x.len() as isize - start)
+                .unwrap_or(0)
+                .min(kernel.coefficients.len());
+            if skip >= take {
+                continue;
+            }
+            let base = (start + skip as isize) as usize;
+            let mut acc = Complex::new(0.0, 0.0);
+            for (c, &v) in kernel.coefficients[skip..take].iter().zip(&x[base..]) {
+                acc += c * v;
+            }
+            out[[b, t]] = acc;
+        }
+    }
+    Ok(out)
+}
 
 /// Computes frame-to-frame magnitude differences in a spectrogram.
 ///
@@ -122,9 +297,9 @@ fn princarg(angle: f64) -> f64 {
 /// where `princarg` wraps to (−π, π]. This is a first-order measure: it is zero only for a
 /// stationary sinusoid exactly at the bin centre. A stationary sinusoid off the bin centre
 /// gives a constant non-zero value, and empty (noise-only) bins give essentially random
-/// values. Note this differs from the second-difference phase deviation
-/// `princarg(φ_t − 2φ_{t−1} + φ_{t−2})` of Bello et al. (2005) and from the complex-domain
-/// ODF `|X_t − X̂_t|`.
+/// values. The complex onset detection function uses [`weighted_phase_deviation`] instead,
+/// the second-difference deviation `princarg(φ_t − 2φ_{t−1} + φ_{t−2})` weighted by magnitude,
+/// which is zero for every stationary sinusoid and for empty bins.
 ///
 /// # Arguments
 ///
@@ -194,6 +369,63 @@ pub fn phase_deviation(
 
     out
 }
+
+/// Computes the magnitude-weighted phase deviation of each bin.
+///
+/// ```text
+/// wpd[b, t] = |X[b,t]| · | princarg( φ[b,t] − 2·φ[b,t−1] + φ[b,t−2] ) |
+/// ```
+///
+/// The second difference of the phase is zero for any stationary sinusoid, whatever its
+/// frequency, and departs from zero when a new component starts (Bello et al., 2004).
+/// Weighting by the magnitude (Dixon, 2006) makes bins that hold no signal contribute
+/// nothing: their phase is noise, or undefined in digital silence, and unweighted it
+/// would swamp the onsets of sparse material. The values are in the units of the
+/// spectrogram, like the magnitude differences, so the two can be added.
+///
+/// # Arguments
+///
+/// * `spec` - 2D complex spectrogram with shape `(frequency_bins, frames)`
+///
+/// # Returns
+///
+/// 2D array of non-negative weighted deviations with the same shape. The first two
+/// frames are zero.
+///
+/// # Example
+///
+/// ```rust
+/// use ndarray::Array2;
+/// use num_complex::Complex;
+/// use audio_samples::operations::onset::complex::weighted_phase_deviation;
+///
+/// // A steady phase advance (any rate) gives no deviation; silence gives none either.
+/// let mut spec = Array2::from_shape_fn((2, 6), |(b, t)| {
+///     Complex::from_polar(2.0, 1.3 * (b + 1) as f64 * t as f64)
+/// });
+/// spec.row_mut(1).fill(Complex::new(0.0, 0.0));
+/// let wpd = weighted_phase_deviation(spec.view());
+/// assert!(wpd.iter().all(|&d| d.abs() < 1e-12));
+///
+/// // A phase jump of 1 rad at frame 3 in a bin of magnitude 2 scores 2.
+/// spec[[0, 3]] *= Complex::from_polar(1.0, 1.0);
+/// let wpd = weighted_phase_deviation(spec.view());
+/// assert!((wpd[[0, 3]] - 2.0).abs() < 1e-12);
+/// ```
+#[inline]
+#[must_use]
+pub fn weighted_phase_deviation(spec: ArrayView2<Complex<f64>>) -> Array2<f64> {
+    let (bins, frames) = spec.dim();
+    let mut out = Array2::zeros((bins, frames));
+    for (mut out_row, spec_row) in out.axis_iter_mut(Axis(0)).zip(spec.axis_iter(Axis(0))) {
+        for t in 2..frames {
+            let d2 = spec_row[t].arg() - 2.0 * spec_row[t - 1].arg() + spec_row[t - 2].arg();
+            out_row[t] = spec_row[t].norm() * princarg(d2).abs();
+        }
+    }
+    out
+}
+
 /// Combines magnitude differences and phase deviations into a single onset detection function.
 ///
 /// For each frame, computes a weighted sum of magnitude and phase contributions across all

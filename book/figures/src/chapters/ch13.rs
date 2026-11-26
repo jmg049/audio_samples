@@ -83,32 +83,20 @@ fn onsets(figs: &mut Figures) -> Result {
     let detected = audio.detect_onsets(&config)?;
     let frames: Vec<f64> = detected.iter().map(|t| (t * FS / HOP).round()).collect();
     check(
-        "onset frames 21, 64, 107, 150",
-        frames == vec![21.0, 64.0, 107.0, 150.0],
+        "onset frames 21, 64, 107, 151",
+        frames == vec![21.0, 64.0, 107.0, 151.0],
     );
     for (k, t) in detected.iter().enumerate() {
         let lead = 0.25 + 0.5 * k as f64 - t;
-        check(
-            format!("lead {lead} in 6.0..8.6 ms"),
-            lead > 0.006 && lead < 0.0086,
-        );
+        check(format!("|lead| {lead} under 7.8 ms"), lead.abs() < 0.0078);
     }
 
     // The chapter's re-implementation of the default peak picking, on the ODF
-    // detect_onsets uses: pre-emphasis, normalisation, threshold.
+    // detect_onsets uses: normalisation, threshold.
     let (_, odf) = audio.onset_detection_function(&config)?;
     let odf: Vec<f64> = odf.iter().copied().collect();
-    let pre: Vec<f64> = (0..odf.len())
-        .map(|i| {
-            if i == 0 {
-                odf[0]
-            } else {
-                0.97f64.mul_add(-odf[i - 1], odf[i])
-            }
-        })
-        .collect();
-    let max = pre.iter().fold(0.0f64, |a, v| a.max(v.abs()));
-    let o: Vec<f64> = pre.iter().map(|v| v / max).collect();
+    let max = odf.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+    let o: Vec<f64> = odf.iter().map(|v| v / max).collect();
     let (half, delta, floor, sep) = (9 / 2, 0.07, 0.1, 3);
     let theta: Vec<f64> = (0..o.len())
         .map(|i| {
@@ -162,9 +150,9 @@ fn onsets(figs: &mut Figures) -> Result {
     figs.svg(
         "ch13-onsets",
         "Top: the four-burst click track (bursts start at 0.25, 0.75, 1.25 and 1.75 s). \
-         Bottom: the pre-emphasised, normalised onset detection function with the default \
-         threshold, and the four onsets detect_onsets reports at frames 21, 64, 107 and 150, \
-         6 to 9 ms before each burst.",
+         Bottom: the normalised onset detection function with the default threshold, and \
+         the four onsets detect_onsets reports at frames 21, 64, 107 and 151, 6 to 8 ms \
+         before the first three bursts and 3 ms after the fourth.",
         (720, 560),
         |area| {
             let panels = rows(area, 2);

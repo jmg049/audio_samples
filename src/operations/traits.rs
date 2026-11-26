@@ -6489,10 +6489,11 @@ where
 
     /// Detects onset times using the complex-domain onset detection function.
     ///
-    /// Combines the CQT magnitude difference and the phase deviation from
-    /// each bin's centre frequency into a single activation curve
-    /// (`w_m·Σ R(Δ|X|) + w_p·Σ |phase deviation|`, optionally log-compressed),
-    /// then applies peak picking (lengths in frames).
+    /// Combines the CQT magnitude difference and the magnitude-weighted phase
+    /// deviation into a single activation curve
+    /// (`w_m·Σ R(Δ|X|) + w_p·Σ |X|·|phase deviation|`, optionally log-compressed),
+    /// then applies peak picking (lengths in frames). Times are frame centres,
+    /// `t·hop_size/sample_rate`.
     ///
     /// # Arguments
     ///
@@ -6506,7 +6507,7 @@ where
     /// # Errors
     ///
     /// Returns [crate::AudioSampleError::Parameter] if `onset_config` fields are invalid.
-    /// Returns [crate::AudioSampleError::Processing] if the STFT computation fails.
+    /// Returns [crate::AudioSampleError::Layout] if the audio has more than one channel.
     fn complex_onset_detection(
         &self,
         onset_config: &ComplexOnsetConfig,
@@ -6515,10 +6516,12 @@ where
     /// Computes the complex-domain onset detection function curve.
     ///
     /// Returns the raw per-frame activation values before peak-picking.
-    /// Each value is `w_m·Σ_b R(|X[b,t]| − |X[b,t−1]|) + w_p·Σ_b dev[b,t]`, where
-    /// R is rectification or absolute value and `dev` is the wrapped phase
-    /// deviation (see [`phase_deviation_matrix`](AudioOnsetDetection::phase_deviation_matrix)),
-    /// optionally passed through `ln(1 + C·x)`.
+    /// Each value is `w_m·Σ_b R(|X[b,t]| − |X[b,t−1]|) + w_p·Σ_b wpd[b,t]`, where
+    /// R is rectification or absolute value and `wpd` is the magnitude-weighted
+    /// phase deviation (see [`phase_deviation_matrix`](AudioOnsetDetection::phase_deviation_matrix)),
+    /// optionally passed through `ln(1 + C·x)`. The CQT is computed on frames of
+    /// `window_size` samples centred every `hop_size` samples
+    /// ([`cqt_frames`](crate::operations::onset::complex::cqt_frames)).
     ///
     /// # Arguments
     ///
@@ -6532,7 +6535,7 @@ where
     /// # Errors
     ///
     /// Returns [crate::AudioSampleError::Parameter] if `onset_config` is invalid.
-    /// Returns [crate::AudioSampleError::Processing] if the STFT computation fails.
+    /// Returns [crate::AudioSampleError::Layout] if the audio has more than one channel.
     fn onset_detection_function_complex(
         &self,
         onset_config: &ComplexOnsetConfig,
@@ -6555,20 +6558,21 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [crate::AudioSampleError::Processing] if the STFT computation fails.
+    /// Returns [crate::AudioSampleError::Parameter] if the CQT parameters are invalid.
+    /// Returns [crate::AudioSampleError::Layout] if the audio has more than one channel.
     fn magnitude_difference_matrix(
         &self,
         config: &ComplexOnsetConfig,
     ) -> AudioSampleResult<Array2<f64>>;
 
-    /// Computes the frame-by-frame phase deviation matrix.
+    /// Computes the frame-by-frame magnitude-weighted phase deviation matrix.
     ///
-    /// Each entry `[b, t]` is `|princarg(φ[b,t] − φ[b,t−1] − 2π·f_b·H/f_s)|`
-    /// in radians: the deviation of the measured phase advance from that of a
-    /// sinusoid at the bin centre frequency f_b (H = hop size). This is a
-    /// first-order measure, not the second-difference phase deviation of
-    /// Bello et al. (2005); a stationary sinusoid off the bin centre gives a
-    /// constant non-zero value. Column 0 is zero.
+    /// Each entry `[b, t]` is `|X[b,t]|·|princarg(φ[b,t] − 2φ[b,t−1] + φ[b,t−2])|`
+    /// (see [`weighted_phase_deviation`](crate::operations::onset::complex::weighted_phase_deviation)):
+    /// the second difference of the phase, zero for any stationary sinusoid,
+    /// weighted by magnitude so that bins without signal contribute nothing.
+    /// This is the phase term of the complex onset detection function. Columns 0
+    /// and 1 are zero.
     ///
     /// # Arguments
     ///
@@ -6581,7 +6585,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [crate::AudioSampleError::Processing] if the STFT computation fails.
+    /// Returns [crate::AudioSampleError::Parameter] if the CQT parameters are invalid.
+    /// Returns [crate::AudioSampleError::Layout] if the audio has more than one channel.
     fn phase_deviation_matrix(&self, config: &ComplexOnsetConfig)
     -> AudioSampleResult<Array2<f64>>;
 }

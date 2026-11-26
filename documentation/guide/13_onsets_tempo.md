@@ -88,41 +88,46 @@ assert_eq!((pp.adaptive_threshold.window_size, pp.min_peak_separation.get()), (9
 assert!((1000.0f64 * 9.0 * 512.0 / 44_100.0 - 104.5).abs() < 0.05);
 assert!((1000.0f64 * 3.0 * 512.0 / 44_100.0 - 34.8).abs() < 0.05);
 assert_eq!((pp.adaptive_threshold.delta, pp.adaptive_threshold.min_threshold), (0.07, 0.1));
-assert!(pp.pre_emphasis && pp.pre_emphasis_coeff == 0.97 && !pp.median_filter);
+assert!(!pp.pre_emphasis && !pp.median_filter);
 
 let onsets = audio.detect_onsets(&config).unwrap();
 println!("{onsets:.4?}");
 assert_eq!(onsets.len(), 4);
-// Peaks fall on frames 21, 64, 107, 150: 43 frames apart (0.4992 s, not 0.5 s).
+// Peaks fall on frames 21, 64, 107, 151.
 let frames: Vec<f64> = onsets.iter().map(|t| (t * 44_100.0 / 512.0).round()).collect();
-assert_eq!(frames, vec![21.0, 64.0, 107.0, 150.0]);
-// Each peak is the last frame whose centre precedes its burst, 6.2 to 8.5 ms
-// before it (less than one hop, 11.6 ms).
+assert_eq!(frames, vec![21.0, 64.0, 107.0, 151.0]);
+// The first three are the last frame whose centre precedes the burst, 6.2 to
+// 7.7 ms before it; the fourth is the frame after, 3.1 ms late. All are within
+// one hop (11.6 ms).
 for (k, t) in onsets.iter().enumerate() {
     let lead = 0.25 + 0.5 * k as f64 - t;
-    assert!(lead > 0.006 && lead < 0.0086, "lead {lead}");
+    assert!(lead.abs() < 0.0078, "lead {lead}");
 }
 ```
 
-The largest increase comes in the last frame before each burst: the long
+Onset times are quantised to whole frames: 0.5 s is 43.07 frames, so each burst
+falls 0.77 ms later relative to the frame grid than the one before. The long
 low-bin kernels (the 72.7 ms window) already respond to a burst that starts
-after their centre, and they gain more from the frame before the burst to
-that frame than from it to the next. The lead grows by 0.77 ms per burst
-because onset times are quantised to whole frames: 0.5 s is 43.07 frames, and
-the detector can only report 43.
+after their centre, so the largest increase tends to come in the frame before
+the burst, 6.2, 7.0 and 7.7 ms early for the first three. By the fourth burst
+that frame is 8.5 ms early and the frame after only 3.1 ms late, and the frame
+after has the larger increase.
 
 <!-- figure: ch13-onsets -->
 
 **The defaults, in frames.** The default
-[`PeakPickingConfig`](crate::operations::types::PeakPickingConfig) pre-emphasises
-the ODF ($o[i] - 0.97\, o[i-1]$), applies no median filter, normalises by the
-maximum, and thresholds with a 9-frame window (104.5 ms), $\delta = 0.07$ and a
-floor $\theta_{lo} = 0.1$; peaks closer than 3 frames (34.8 ms) are merged.
+[`PeakPickingConfig`](crate::operations::types::PeakPickingConfig) applies
+neither pre-emphasis nor a median filter, normalises by the maximum, and
+thresholds with a 9-frame window (104.5 ms), $\delta = 0.07$ and a floor
+$\theta_{lo} = 0.1$; peaks closer than 3 frames (34.8 ms) are merged.
+Pre-emphasis ($o[i] - \alpha\, o[i-1]$) is available but off: the ODF is already
+a difference of spectra, and pre-emphasising it moves each peak to the frame
+where it rises fastest, which comes before the onset.
 
 The floor removes weak onsets. After normalisation, no peak weaker than a
 tenth of the strongest one in the clip is reported. The lab's eight-burst
 track has three quiet bursts (the first three, 26 dB below the others), and
-the defaults find only 5 onsets: the quiet bursts peak at 0.020, 0.034 and
+the defaults find only 5 onsets: the quiet bursts peak at 0.036, 0.033 and
 0.024 of the largest value. Lowering `adaptive_threshold.min_threshold` to
 0.01 finds all 8.
 
@@ -131,9 +136,9 @@ Starting from the configuration with the 0.01 floor (the lab, on 8 bursts) and
 switching on one such setting at a time (a median filter of length 3, a
 threshold window of 1024, a separation of 512) shows the effect of each: the
 length-3 median deletes every one-frame peak (0 onsets); a 1024-frame threshold window, clipped to the signal length,
-makes the threshold the global maximum minus $\delta$ (3 onsets); a 512-frame
+makes the threshold the global maximum minus $\delta$ (1 onset); a 512-frame
 separation, reduced to a quarter of the signal (91 frames, 1.06 s), keeps only
-3. Switching pre-emphasis off changes nothing on this signal (8). The threshold,
+3. Switching pre-emphasis on (0.97) still finds all 8 on this signal. The threshold,
 the minimum spacing and the pre-emphasis all live in `peak_picking`;
 [`OnsetDetectionConfig`](crate::operations::onset::OnsetDetectionConfig) itself
 holds the CQT, the hop and the median-based zeroing of the ODF.
@@ -192,13 +197,10 @@ for t in 1..m.ncols() {
 }
 
 // 2. Peak picking with the default settings (on the ODF detect_onsets uses):
-//    pre-emphasis, peak normalisation, threshold, local maxima, separation.
+//    peak normalisation, threshold, local maxima, separation.
 let (_, odf) = audio.onset_detection_function(&config).unwrap();
-let pre: Vec<f64> = (0..odf.len().get())
-    .map(|i| if i == 0 { odf[0] } else { 0.97f64.mul_add(-odf[i - 1], odf[i]) })
-    .collect();
-let max = pre.iter().fold(0.0f64, |a, v| a.max(v.abs()));
-let o: Vec<f64> = pre.iter().map(|v| v / max).collect();
+let max = odf.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+let o: Vec<f64> = odf.iter().map(|v| v / max).collect();
 let (half, delta, floor, sep) = (9 / 2, 0.07, 0.1, 3);
 let mut candidates: Vec<(usize, f64)> = (1..o.len() - 1)
     .filter(|&i| {
@@ -395,12 +397,12 @@ assert!((fine - 1.38).abs() < 0.005);
   ($H$ samples each). Convert with frames = seconds $\times f_s / H$.
 - **The default floor removes weak onsets.** The ODF is normalised by its
   maximum and the default threshold never drops below 0.1, so an onset whose
-  (pre-emphasised) peak is under a tenth of the clip's strongest is not
+  peak is under a tenth of the clip's strongest is not
   reported. Lower `adaptive_threshold.min_threshold` for material with a wide
   dynamic range, and check the result with `explain_with`.
 - **Reported times are frame centres**, quantised to $H/f_s$; on clean clicks
   the peak usually falls in the last frame before the onset, so the reported
-  time is early by less than one hop.
+  time is within one hop and usually early.
 - **"Energy" flux is magnitude flux** here: magnitudes are not squared.
 - **Octave errors in tempo** are expected, not exceptional: check the
   estimate against $2\times$ and $\tfrac{1}{2}\times$ (and $3\times$) before
