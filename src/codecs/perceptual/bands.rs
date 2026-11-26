@@ -7,7 +7,8 @@
 //! - [`BandLayout::bark`]: bands of equal width on the Bark scale (Traunmüller,
 //!   1990), the basis of most MPEG psychoacoustic models.
 //! - [`BandLayout::mel`]: bands of equal width on the HTK (O'Shaughnessy) mel scale.
-//! - [`BandLayout::erb`]: bands of equal width on the ERB-number scale.
+//! - [`BandLayout::erb`]: bands of equal width on the ERB-number scale
+//!   (Glasberg & Moore, 1990).
 //! - [`BandLayout::celt`]: the fixed band edges of the CELT codec.
 //!
 //! Each [`Band`] produced by these constructors stores:
@@ -137,8 +138,7 @@ fn hz_to_bin(hz: f32, sample_rate_hz: f32, n_bins: usize) -> usize {
 /// At 0 Hz the minimum value is 24.7 Hz. This is a bandwidth, **not** a perceptual
 /// frequency coordinate: because it is affine in Hz, spacing filters uniformly in this
 /// quantity is the same as spacing them uniformly in Hz. The perceptual coordinate is
-/// the ERB-number (ERB-rate) scale E(f) = 21.4·log10(1 + 0.00437 f) Cams, which is not
-/// implemented here.
+/// the ERB-number (ERB-rate) scale, [`hz_to_erb_number`].
 ///
 /// # Arguments
 /// - `hz` - Frequency in hertz. Negative values are clamped to 0.
@@ -167,6 +167,40 @@ pub fn hz_to_erb(hz: f32) -> f32 {
 #[must_use]
 pub fn erb_to_hz(erb: f32) -> f32 {
     (1000.0_f32 * (erb / 24.7_f32 - 1.0_f32) / 4.37_f32).max(0.0)
+}
+
+/// Converts a frequency in Hz to its ERB number (ERB-rate), in Cam (Glasberg & Moore, 1990).
+///
+/// `E(f) = 21.4 × log10(1 + 0.00437 × f)` Cam
+///
+/// The ERB number counts how many auditory-filter bandwidths ([`hz_to_erb`]) lie below
+/// `f`: one Cam is one equivalent rectangular bandwidth. Equal steps on this scale are
+/// the perceptual spacing that [`BandLayout::erb`] uses. 1 kHz is about 15.62 Cam.
+///
+/// # Arguments
+/// - `hz` - Frequency in hertz. Negative values are clamped to 0.
+///
+/// # Returns
+/// ERB number in Cam, 0 at 0 Hz.
+#[inline]
+#[must_use]
+pub fn hz_to_erb_number(hz: f32) -> f32 {
+    21.4_f32 * 0.00437_f32.mul_add(hz.max(0.0), 1.0).log10()
+}
+
+/// Converts an ERB number (Cam) back to a frequency in Hz.
+///
+/// Inverse of [`hz_to_erb_number`]: `f = (10^(E / 21.4) - 1) / 0.00437`.
+///
+/// # Arguments
+/// - `erb_number` - ERB number in Cam. Negative values are clamped to 0.
+///
+/// # Returns
+/// Frequency in hertz, 0 at 0 Cam.
+#[inline]
+#[must_use]
+pub fn erb_number_to_hz(erb_number: f32) -> f32 {
+    (10.0_f32.powf(erb_number.max(0.0) / 21.4_f32) - 1.0_f32) / 0.00437_f32
 }
 
 /// Scales a [`BandLayout`] from one spectral-bin count to another.
@@ -352,16 +386,19 @@ impl BandLayout {
 
     /// Creates an ERB-scale band layout.
     ///
-    /// Divides the spectrum from 0 Hz to Nyquist into `n_bands` bands spaced
-    /// evenly in the ERB **bandwidth** function [`hz_to_erb`]. Because that function
-    /// is affine in Hz, **every band has the same width in Hz** (fs/(2·`n_bands`)):
-    /// this layout is linear in frequency, not perceptual, and has very little
-    /// low-frequency resolution.
+    /// Divides the spectrum from 0 Hz to Nyquist into `n_bands` bands of equal width on
+    /// the ERB-number scale E(f) = 21.4·log10(1 + 0.00437 f) Cam (Glasberg & Moore 1990,
+    /// see [`hz_to_erb_number`]), so the bands are narrow at low frequencies and wide at
+    /// high frequencies, following the bandwidths of the auditory filters. Band edges are
+    /// mapped to bins on the real-FFT grid k·(fs/2)/(`n_bins` − 1) (about half a bin off
+    /// for MDCT bins).
     ///
-    /// Warning: a perceptual ERB layout would space bands evenly on the ERB-number
-    /// scale E(f) = 21.4·log10(1 + 0.00437 f) (Glasberg & Moore 1990), giving narrow
-    /// bands at low frequencies. That is not what this constructor does; prefer
-    /// [`BandLayout::bark`] for a perceptual layout.
+    /// The bands tile the bins `0..n_bins` without gaps or overlaps. When `n_bins` is too
+    /// small to give every band at least one bin, the edges of neighbouring bands round
+    /// to the same bin; each band that would be empty is merged into the band above it,
+    /// so the layout then has fewer than `n_bands` bands. Use [`BandLayout::len`] for the
+    /// number of bands (for example to size the perceptual weights of a
+    /// `PsychoacousticConfig`).
     ///
     /// `n_bins` is the number of spectral bins in the caller's frequency
     /// representation. Bin indices in the returned bands index into that array.
@@ -372,7 +409,8 @@ impl BandLayout {
     /// - `n_bins` - Total number of spectral bins.
     ///
     /// # Returns
-    /// A `BandLayout` with `n_bands` entries.
+    /// A `BandLayout` with at most `n_bands` entries; exactly `n_bands` when every band
+    /// spans at least one bin.
     ///
     /// # Examples
     ///
@@ -387,9 +425,21 @@ impl BandLayout {
     ///     NonZeroUsize::new(1024).unwrap(),
     /// );
     /// assert_eq!(layout.len().get(), 32);
-    /// for band in layout.as_slice().iter() {
+    /// let bands = layout.as_slice();
+    /// for band in bands.iter() {
     ///     assert!(band.end_bin > band.start_bin);
     /// }
+    /// // Narrow bands at low frequencies, wide bands at high frequencies.
+    /// let width = |i: usize| bands[i].end_bin - bands[i].start_bin;
+    /// assert!(width(31) > 10 * width(1));
+    ///
+    /// // Four bins cannot hold 32 bands: empty bands are merged.
+    /// let small = BandLayout::erb(
+    ///     NonZeroUsize::new(32).unwrap(),
+    ///     44100.0,
+    ///     NonZeroUsize::new(4).unwrap(),
+    /// );
+    /// assert!(small.len().get() <= 4);
     /// # }
     /// ```
     #[must_use]
@@ -397,32 +447,49 @@ impl BandLayout {
         let n = n_bands.get();
         let bins = n_bins.get();
         let nyquist = sample_rate_hz / 2.0;
-        let erb_min = hz_to_erb(0.0);
-        let erb_max = hz_to_erb(nyquist);
-        let erb_range = erb_max - erb_min;
+        let erb_max = hz_to_erb_number(nyquist);
+        let erb_edge = |i: usize| i as f32 * erb_max / n as f32;
 
-        let bands: Vec<Band> = (0..n)
-            .map(|i| {
-                let erb_start = erb_min + i as f32 * erb_range / n as f32;
-                let erb_end = erb_min + (i + 1) as f32 * erb_range / n as f32;
-                let erb_centre = (erb_start + erb_end) / 2.0;
+        // Band `i` covers [edges[i], edges[i + 1]). The first edge is bin 0 and the last
+        // is `bins`, so the bands tile every bin; the interior edges are rounded to bins
+        // and are non-decreasing because the ERB-number scale is increasing.
+        let bin_edge = |i: usize| match i {
+            0 => 0,
+            i if i == n => bins,
+            i => hz_to_bin(erb_number_to_hz(erb_edge(i)), sample_rate_hz, bins),
+        };
 
-                let hz_start = erb_to_hz(erb_start);
-                let hz_end = erb_to_hz(erb_end);
-                let hz_centre = erb_to_hz(erb_centre);
+        let mut bands: Vec<Band> = Vec::with_capacity(n.min(bins));
+        let mut start = 0;
+        while start < n {
+            let start_bin = bin_edge(start);
+            // An empty band (its upper edge on the same bin as its lower edge) is merged
+            // with the bands above it until the upper edge passes `start_bin`.
+            let mut end = start + 1;
+            while end < n && bin_edge(end) <= start_bin {
+                end += 1;
+            }
+            let end_bin = bin_edge(end);
+            let erb_centre = (erb_edge(start) + erb_edge(end)) / 2.0;
+            let perceptual_position = if erb_max > 0.0 {
+                erb_centre / erb_max
+            } else {
+                0.0
+            };
+            // SAFETY: the inner loop stops at an edge above `start_bin`, or at the last
+            // edge, `bins`, which is above every interior edge (at most `bins - 1`).
+            bands.push(unsafe {
+                Band::new(
+                    start_bin,
+                    end_bin,
+                    erb_number_to_hz(erb_centre),
+                    perceptual_position,
+                )
+            });
+            start = end;
+        }
 
-                let start_bin = hz_to_bin(hz_start, sample_rate_hz, bins);
-                let end_bin_raw = hz_to_bin(hz_end, sample_rate_hz, bins);
-                let end_bin = end_bin_raw.max(start_bin + 1).min(bins);
-
-                let perceptual_position = (erb_centre - erb_min) / erb_range;
-
-                // SAFETY: end_bin > start_bin is enforced above.
-                unsafe { Band::new(start_bin, end_bin, hz_centre, perceptual_position) }
-            })
-            .collect();
-
-        // SAFETY: n_bands >= 1 guarantees at least one element.
+        // SAFETY: n_bands >= 1, so the loop runs at least once and pushes a band.
         let bands_non_empty = unsafe { NonEmptySlice::new_unchecked(&bands) };
         Self::new(bands_non_empty)
     }
@@ -499,5 +566,100 @@ impl BandLayout {
 
         let bands_ne = NonEmptySlice::new(&bands).expect("bands is non-empty");
         Self::new(bands_ne)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nz(n: usize) -> NonZeroUsize {
+        NonZeroUsize::new(n).unwrap()
+    }
+
+    /// Checks that the bands tile `0..n_bins` in order, each with at least one bin.
+    fn assert_tiles(layout: &BandLayout, n_bins: usize) {
+        let bands = layout.as_slice();
+        assert_eq!(bands[0].start_bin, 0);
+        assert_eq!(bands[bands.len().get() - 1].end_bin, n_bins);
+        for band in bands.iter() {
+            assert!(band.end_bin > band.start_bin, "empty band {band:?}");
+        }
+        for pair in bands.as_slice().windows(2) {
+            assert_eq!(pair[0].end_bin, pair[1].start_bin);
+            assert!(pair[1].centre_frequency > pair[0].centre_frequency);
+            assert!(pair[1].perceptual_position > pair[0].perceptual_position);
+        }
+    }
+
+    #[test]
+    fn erb_number_matches_glasberg_moore_and_round_trips() {
+        assert_eq!(hz_to_erb_number(0.0), 0.0);
+        assert_eq!(hz_to_erb_number(-5.0), 0.0);
+        assert!((hz_to_erb_number(1_000.0) - 15.62).abs() < 0.01);
+        for f in [50.0f32, 440.0, 1_000.0, 4_000.0, 16_000.0] {
+            let expected = 21.4 * (1.0 + 0.00437 * f64::from(f)).log10();
+            assert!((f64::from(hz_to_erb_number(f)) - expected).abs() < 1e-4);
+            assert!((erb_number_to_hz(hz_to_erb_number(f)) - f).abs() / f < 1e-4);
+        }
+        assert_eq!(erb_number_to_hz(-1.0), 0.0);
+    }
+
+    #[test]
+    fn erb_bands_are_equally_spaced_in_erb_number() {
+        let (n_bands, sample_rate, n_bins) = (32, 44_100.0f32, 4096);
+        let layout = BandLayout::erb(nz(n_bands), sample_rate, nz(n_bins));
+        assert_eq!(layout.len().get(), n_bands);
+        assert_tiles(&layout, n_bins);
+
+        let erb_max = hz_to_erb_number(sample_rate / 2.0);
+        let step = erb_max / n_bands as f32;
+        for (i, band) in layout.as_slice().iter().enumerate() {
+            // Centres sit half a step into each band.
+            let centre = hz_to_erb_number(band.centre_frequency);
+            assert!(
+                (centre - (i as f32 + 0.5) * step).abs() < 1e-3,
+                "band {i}: {centre}"
+            );
+            assert!((band.perceptual_position - (i as f32 + 0.5) / n_bands as f32).abs() < 1e-5);
+            // The lower edge is the bin of the frequency `i` steps up the ERB-number scale.
+            let edge_hz = erb_number_to_hz(i as f32 * step);
+            let expected = (edge_hz / (sample_rate / 2.0) * (n_bins - 1) as f32).round() as usize;
+            assert_eq!(band.start_bin, expected, "band {i}");
+        }
+
+        // ERB spacing is not linear: the bands widen with frequency.
+        let bands = layout.as_slice();
+        let widths: Vec<usize> = bands.iter().map(|b| b.end_bin - b.start_bin).collect();
+        assert!(widths[n_bands - 1] > 20 * widths[0]);
+        let low_half: usize = widths[..n_bands / 2].iter().sum();
+        assert!(low_half < n_bins / 8, "low half spans {low_half} bins");
+    }
+
+    #[test]
+    fn erb_with_few_bins_merges_empty_bands() {
+        for n_bins in 1..=64 {
+            for n_bands in [1, 2, 8, 32, 64, 200] {
+                let layout = BandLayout::erb(nz(n_bands), 48_000.0, nz(n_bins));
+                assert!(layout.len().get() <= n_bands.min(n_bins));
+                assert_tiles(&layout, n_bins);
+            }
+        }
+        let one = BandLayout::erb(nz(32), 48_000.0, nz(1));
+        assert_eq!(one.len().get(), 1);
+        assert_eq!(
+            (one.as_slice()[0].start_bin, one.as_slice()[0].end_bin),
+            (0, 1)
+        );
+    }
+
+    #[test]
+    fn erb_with_a_degenerate_sample_rate_does_not_panic() {
+        for sample_rate in [0.0f32, -8_000.0, f32::NAN, f32::INFINITY] {
+            let layout = BandLayout::erb(nz(16), sample_rate, nz(128));
+            let bands = layout.as_slice();
+            assert_eq!(bands[0].start_bin, 0);
+            assert_eq!(bands[bands.len().get() - 1].end_bin, 128);
+        }
     }
 }

@@ -51,8 +51,9 @@ implements them as follows.
   $\mathrm{ERB}(f) = 24.7 (4.37 f / 1000 + 1)$ Hz, which is what
   [`hz_to_erb`](crate::codecs::perceptual::bands::hz_to_erb) returns (a
   bandwidth in Hz, despite its name). The perceptual *coordinate* is the
-  ERB-number scale $E(f) = 21.4 \log_{10}(1 + 0.00437 f)$ Cam, which the
-  library does not provide; we compute it below.
+  ERB-number scale $E(f) = 21.4 \log_{10}(1 + 0.00437 f)$ Cam, in
+  [`hz_to_erb_number`](crate::codecs::perceptual::bands::hz_to_erb_number).
+  [`BandLayout::erb`](crate::BandLayout::erb) spaces its bands evenly on it.
 
 <!-- figure: ch14-scales -->
 
@@ -147,7 +148,9 @@ The scales and the threshold of hearing, as implemented:
 
 ```rust
 use audio_samples::absolute_threshold_of_hearing;
-use audio_samples::codecs::perceptual::bands::{bark_to_hz, hz_to_bark, hz_to_erb};
+use audio_samples::codecs::perceptual::bands::{
+    bark_to_hz, erb_number_to_hz, hz_to_bark, hz_to_erb, hz_to_erb_number,
+};
 use audio_samples::utils::audio_math::{hz_to_mel, mel_to_hz};
 
 // HTK mel: 1000 Hz is (almost exactly) 1000 mel, and the inverse round-trips.
@@ -164,9 +167,11 @@ assert!((hz_to_erb(4_000.0) - 456.456).abs() < 1e-2);
 // 15.5 to 38.5 dB. The library's constant 14.5 dB is its z = 0 value.
 let johnston_tonal = |z: f64| 14.5 + z;
 assert_eq!((johnston_tonal(1.0), johnston_tonal(24.0)), (15.5, 38.5));
-// The ERB-number (perceptual coordinate) is not in the library: 15.62 Cam at 1 kHz.
+// The ERB-number (perceptual coordinate): 15.62 Cam at 1 kHz, and its inverse.
 let erb_number = |f: f64| 21.4 * (1.0 + 0.00437 * f).log10();
 assert!((erb_number(1_000.0) - 15.62).abs() < 0.01);
+assert!((f64::from(hz_to_erb_number(1_000.0)) - erb_number(1_000.0)).abs() < 1e-4);
+assert!((erb_number_to_hz(hz_to_erb_number(1_000.0)) - 1_000.0).abs() < 0.05);
 
 // Threshold in quiet (dB SPL): 22.95 at 100 Hz, 3.37 at 1 kHz, -4.98 at 3.3 kHz.
 assert!((absolute_threshold_of_hearing(100.0) - 22.95).abs() < 0.01);
@@ -436,7 +441,8 @@ assert!((spl - 82.0).abs() < 1e-12);
   (linear below 1 kHz, logarithmic above) differ; `audio_math` uses HTK, the
   mel spectrogram uses Slaney.
 - **`hz_to_erb` returns a bandwidth**, not an ERB-number; uniformly spaced
-  ERB *bandwidths* are uniformly spaced in Hz.
+  ERB *bandwidths* are uniformly spaced in Hz. Use `hz_to_erb_number` for the
+  perceptual coordinate.
 - **Masking direction.** Masking spreads *upwards* in frequency. The library's
   `PsychoacousticConfig` presets invert the slopes, and its `conservative` /
   `aggressive` preset names are also the reverse of their effect; set the
@@ -467,7 +473,8 @@ assert!((spl - 82.0).abs() < 1e-12);
 - [`hz_to_mel`](crate::utils::audio_math::hz_to_mel),
   [`mel_to_hz`](crate::utils::audio_math::mel_to_hz),
   [`hz_to_bark`](crate::codecs::perceptual::bands::hz_to_bark),
-  [`hz_to_erb`](crate::codecs::perceptual::bands::hz_to_erb)
+  [`hz_to_erb`](crate::codecs::perceptual::bands::hz_to_erb),
+  [`hz_to_erb_number`](crate::codecs::perceptual::bands::hz_to_erb_number)
 - [`absolute_threshold_of_hearing`](crate::absolute_threshold_of_hearing),
   [`spreading_attenuation`](crate::spreading_attenuation),
   [`PsychoacousticConfig`](crate::PsychoacousticConfig),

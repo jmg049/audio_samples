@@ -401,6 +401,18 @@ The librosa-compatible API is unreleased, so these are changes to the
 
 ### Fixed
 
+- **`BandLayout::erb` spaces its bands evenly on the ERB-number scale.** It spaced them evenly
+  in the ERB *bandwidth* (`hz_to_erb`), which is affine in Hz, so every band had the same
+  width in Hz. The band edges are now equal steps of E(f) = 21.4·log10(1 + 0.00437 f) Cam
+  (Glasberg & Moore 1990): narrow bands at low frequencies, wide ones at high frequencies.
+  The bands tile the bins `0..n_bins` without gaps or overlaps (the top band ends at
+  `n_bins`), and when `n_bins` is too small to give every band a bin, an empty band is merged
+  into the band above it, so the layout can have fewer than `n_bands` bands (it used to give
+  overlapping bands). The bin ranges, centre frequencies and perceptual positions of the
+  bands change, and with them the output of a codec or analysis configured with an ERB
+  layout. Encoded audio is an in-memory structure with no serialised format, so no stored
+  data is affected. New `hz_to_erb_number` and
+  `erb_number_to_hz` in `codecs::perceptual::bands` convert between Hz and the ERB number.
 - **The links between the two librosa migration documents work on docs.rs.** The
   `librosa_migration` and `moving_from_librosa_rust` pages linked to each other by file name,
   which only works on GitHub; the rendered pages now link to each other's module.
