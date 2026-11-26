@@ -75,6 +75,10 @@ jobs:
           else
             cargo test --features "$FEATURES"
           fi
+      - name: example tests
+        if: matrix.features == 'full_no_plotting'
+        # Examples' #[test] functions only compile under `cargo test --examples`.
+        run: cargo test --examples --features "full_no_plotting educational"
 
   doc:
     name: doc (${{ matrix.features }})

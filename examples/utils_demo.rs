@@ -348,7 +348,7 @@ mod tests {
         let frames = 1000;
         let sample_rate = 44100.0f64;
         let hop_size = 512;
-        let time = frames_to_time::<f64>(frames, sample_rate, hop_size);
+        let time = frames_to_time(frames, sample_rate, hop_size);
         let frames_back = time_to_frames(time, sample_rate, hop_size);
         assert_eq!(frames, frames_back);
     }
