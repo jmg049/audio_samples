@@ -16,7 +16,16 @@ categories = ["multimedia::audio", "science"]
 # Not part of the published crate: the mdBook of the learning guide and its
 # figures crate, the benchmark comparison and repository tooling. crates.io limits
 # an upload to 10 MiB; the release workflow checks the packaged size.
-exclude = ["book/", "benchmarks/", ".github/", ".pre-commit-config.yaml"]
+exclude = [
+    "book/",
+    "benchmarks/",
+    ".github/",
+    ".pre-commit-config.yaml",
+    # Golden fixtures and their generators (about 25 MB) are for the repository's
+    # test suite; the published crate would exceed the crates.io size limit.
+    "tests/fixtures/",
+    "tests/reference/",
+]
 
 [package.metadata.docs.rs]
 # Every feature except `static-plots`, whose build script needs Chrome and network
