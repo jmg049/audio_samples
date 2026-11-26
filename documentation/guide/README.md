@@ -51,7 +51,7 @@ snippets in a crate of your own, add these dependencies to its `Cargo.toml`
 ```toml
 [dependencies]
 audio_samples = { version = "3", features = ["educational", "full_no_plotting"] }
-spectrograms = "2.2.0"    # StftParams, WindowType, MelParams, LogParams, ...
+spectrograms = "2.2.1"    # StftParams, WindowType, MelParams, LogParams, ...
 ndarray = "0.17"          # Array1 and the array! macro
 num-complex = "0.4"       # complex numbers in the "How it works" sections
 non-empty-slice = "0.6"   # NonEmptySlice / NonEmptyVec arguments

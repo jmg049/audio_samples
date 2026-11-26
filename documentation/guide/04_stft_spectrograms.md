@@ -338,8 +338,6 @@ assert!((s.data()[[0, last]] - peak + 142.13).abs() < 0.01);
 * Power is $|X|^2$ with no $1/N$ or window normalisation: a full-scale sine
   reads about $+42$ dB at $N = 512$, and the number grows with $N$.
 * `istft` can return up to $H - 1$ samples fewer than the input; trim or pad.
-* The mel spectrogram's `frequencies()` axis is correct only for
-  $f_\mathrm{min} = 0$ and $f_\mathrm{max} = f_s/2$ in `spectrograms` 2.2.0.
 * A smaller hop does not improve resolution; only $N$ (and the window shape)
   sets it.
 

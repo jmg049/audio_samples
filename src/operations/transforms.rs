@@ -538,10 +538,9 @@ where
     /// 10·log10(max(mel power, 10^(floor_db/10))) re 1. See the module docs for the
     /// formulas.
     ///
-    /// Note: the result's `frequencies()` axis is only
-    /// correct when `f_min = 0` and `f_max` = Nyquist; for other ranges compute the
-    /// band centres yourself (the inner `n_mels` of `n_mels + 2` points equally
-    /// spaced on the Slaney mel scale between `f_min` and `f_max`).
+    /// The result's `frequencies()` axis gives the band centres: the inner `n_mels`
+    /// of `n_mels + 2` points equally spaced on the mel scale between `f_min` and
+    /// `f_max`.
     ///
     /// Prefer the typed
     /// convenience methods - [`mel_mag_spectrogram`](crate::operations::AudioTransforms::mel_mag_spectrogram),

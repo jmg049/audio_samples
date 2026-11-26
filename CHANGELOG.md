@@ -11,10 +11,13 @@ the one-line `Display` format, and setters and lookups that now return errors
 instead of panicking. *Output changes in released (2.0.x) APIs* lists operations
 whose results change for the same input.
 
-Requires `spectrograms` 2.2.0 and `i24` 2.3.6. spectrograms 2.2.0 fixes the Kaiser
+Requires `spectrograms` 2.2.1 and `i24` 2.3.6. spectrograms 2.2 fixes the Kaiser
 window for β > 3.75, spaces gammatone and ERB filters on the ERB-number scale, and
-centres CQT kernels in the frame (events were reported early), so those outputs
-change. Neither crate enables pyo3's `experimental-inspect` any more.
+centres CQT kernels in the frame (events were reported early). In 2.2.1 a mel
+spectrogram's `frequencies()` axis gives the filterbank's band centres for any
+`f_min`/`f_max` (it assumed 0 Hz to Nyquist), uncentred frames are timed at their
+centre rather than their start, and a CQT whose `f_min` is at or above Nyquist is
+an error. Those outputs change. Neither crate enables pyo3's `experimental-inspect` any more.
 
 - **`ResamplingQuality::VeryHigh`**: windowed sinc with a 185 dB stopband from the Nyquist
   frequency on (ripple below 1e-9) and its passband to 0.95 of the lower Nyquist frequency for
@@ -726,7 +729,7 @@ odd-length spectral bin spacing, `frequency_to_note` and
   centre frequency long, so its magnitude depended on the phase of the signal: a decaying tone
   gave a fluctuating detection function with extra peaks, and the detection-function peaks of
   similar clicks differed by a factor of 100 or more (now about 3). With the kernels centred in
-  the frame (`spectrograms` 2.2.0) the default configuration reports clean onsets within one hop
+  the frame (`spectrograms` 2.2) the default configuration reports clean onsets within one hop
   (11.6 ms at 44.1 kHz), mostly in the frame just before the onset; they were reported about
   30 ms early.
 - **The peak picker no longer pre-emphasises by default.** `PeakPickingConfig::default()` and
@@ -800,12 +803,6 @@ odd-length spectral bin spacing, `frequency_to_note` and
   table, sampled from a per-quality prototype, so `pitch_shift` with a new `n_steps` no longer builds a
   table of its own and a sweep over many distinct shifts runs about five times faster. Common (small-L) ratios are
   bit-identical; awkward ratios change below the table-interpolation error (< -120 dB).
-
-### Known issues
-
-- A mel spectrogram's `frequencies()` axis ignores `f_min`/`f_max`; it is
-  correct only for the range 0 Hz to Nyquist. This is inherited from the
-  `spectrograms` crate (2.2.0).
 
 ## 2.0.0
 

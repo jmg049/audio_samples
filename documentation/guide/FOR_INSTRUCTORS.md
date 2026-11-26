@@ -137,10 +137,7 @@ To compare with librosa, see the
 it lists the crate's librosa-compatible APIs and how the APIs used in this
 guide differ from librosa.
 
-Known limitations worth telling students about are documented in each module
-and listed under "Known issues" in the crate's `CHANGELOG.md`. For example, in
-this release the mel spectrogram's `frequencies()` axis, which comes from the
-external `spectrograms` crate, ignores `f_min`/`f_max`.
+Known limitations worth telling students about are documented in each module.
 
 Limitations of the teaching material itself:
 

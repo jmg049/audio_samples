@@ -2539,10 +2539,9 @@ where
     /// 10·log10(max(mel power, 10^(floor_db/10))) re 1. See the
     /// [`crate::operations::transforms`] module docs for the formulas.
     ///
-    /// Note: in `spectrograms` 2.2.0 the result's `frequencies()` axis is only
-    /// correct when `f_min = 0` and `f_max` = Nyquist; for other ranges compute the
-    /// band centres yourself (the inner `n_mels` of `n_mels + 2` points equally
-    /// spaced on the Slaney mel scale between `f_min` and `f_max`).
+    /// The result's `frequencies()` axis gives the band centres: the inner `n_mels`
+    /// of `n_mels + 2` points equally spaced on the mel scale between `f_min` and
+    /// `f_max`.
     ///
     /// Prefer the typed
     /// convenience methods - [`mel_mag_spectrogram`](crate::operations::AudioTransforms::mel_mag_spectrogram),
@@ -2965,7 +2964,7 @@ where
     /// analysis. The kernel for bin k is about Q·f_s/f_k samples long, so low
     /// bins have long kernels (good frequency, poor time resolution).
     ///
-    /// Note (`spectrograms` 2.2.0): frames are `min(signal_len, 16384)` samples
+    /// Note (`spectrograms` 2.2): frames are `min(signal_len, 16384)` samples
     /// long and are not centred, so a signal shorter than 16384 samples yields a
     /// single frame whatever `hop_size` is; kernels longer than the frame are
     /// truncated, which lowers the effective Q at low frequencies. Frame `i` starts
@@ -2984,7 +2983,8 @@ where
     ///
     /// # Errors
     /// - [`crate::AudioSampleError::Layout`] if the signal is multi-channel.
-    /// - Errors from the underlying CQT computation.
+    /// - Errors from the underlying CQT computation, including `f_min` at or above
+    ///   the Nyquist frequency.
     ///
     /// ## See Also
     /// - [Constant-Q transform - Wikipedia](https://en.wikipedia.org/wiki/Constant-Q_transform)

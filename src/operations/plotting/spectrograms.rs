@@ -1155,18 +1155,18 @@ where
         }
         SpectrogramType::MelMagnitude { mel_params } => {
             let spec = audio.mel_mag_spectrogram(spec_params, mel_params)?;
-            with_mel_axis(extract_spectrogram_data(spec), mel_params)
+            extract_spectrogram_data(spec)
         }
         SpectrogramType::MelPower { mel_params } => {
             let spec = audio.mel_power_spectrogram(spec_params, mel_params)?;
-            with_mel_axis(extract_spectrogram_data(spec), mel_params)
+            extract_spectrogram_data(spec)
         }
         SpectrogramType::MelDb {
             mel_params,
             db_params,
         } => {
             let spec = audio.mel_db_spectrogram(spec_params, mel_params, db_params)?;
-            with_mel_axis(extract_spectrogram_data(spec), mel_params)
+            extract_spectrogram_data(spec)
         }
         SpectrogramType::Gammatone { gammatone_params } => {
             let spec = audio.gammatone_magnitude_spectrogram(spec_params, gammatone_params)?;
@@ -1216,52 +1216,6 @@ where
     let data = spec.data().clone();
 
     (time_axis, freq_axis, data)
-}
-
-/// Replaces the frequency axis of a mel spectrogram with its true band centres.
-///
-/// `spectrograms` 2.2.0 reports mel band centres for the range 0 Hz to Nyquist
-/// regardless of `MelParams::f_min`/`f_max`, so its `frequencies()` axis is wrong
-/// whenever the mel range is narrower. This rebuilds the axis exactly as the
-/// filterbank is built: `n_mels + 2` points equally spaced on the Slaney mel scale
-/// between `f_min` and `f_max`, keeping the inner `n_mels` points.
-#[cfg(feature = "transforms")]
-fn with_mel_axis(
-    (time_axis, _freq_axis, data): (Vec<f64>, Vec<f64>, ndarray::Array2<f64>),
-    mel_params: &MelParams,
-) -> (Vec<f64>, Vec<f64>, ndarray::Array2<f64>) {
-    (time_axis, slaney_mel_band_centres(mel_params), data)
-}
-
-/// Centre frequencies (Hz) of the Slaney-scale triangular mel filters for `mel_params`.
-#[cfg(feature = "transforms")]
-fn slaney_mel_band_centres(mel_params: &MelParams) -> Vec<f64> {
-    // Slaney mel scale: linear below 1 kHz, logarithmic above.
-    const F_SP: f64 = 200.0 / 3.0;
-    const MIN_LOG_HZ: f64 = 1000.0;
-    const MIN_LOG_MEL: f64 = MIN_LOG_HZ / F_SP;
-    let logstep = 6.4_f64.ln() / 27.0;
-    let hz_to_mel = |hz: f64| {
-        if hz >= MIN_LOG_HZ {
-            MIN_LOG_MEL + (hz / MIN_LOG_HZ).ln() / logstep
-        } else {
-            hz / F_SP
-        }
-    };
-    let mel_to_hz = |mel: f64| {
-        if mel >= MIN_LOG_MEL {
-            MIN_LOG_HZ * (logstep * (mel - MIN_LOG_MEL)).exp()
-        } else {
-            F_SP * mel
-        }
-    };
-    let n_mels = mel_params.n_mels().get();
-    let mel_min = hz_to_mel(mel_params.f_min());
-    let mel_max = hz_to_mel(mel_params.f_max());
-    let step = (mel_max - mel_min) / (n_mels + 1) as f64;
-    (1..=n_mels)
-        .map(|i| mel_to_hz((i as f64).mul_add(step, mel_min)))
-        .collect()
 }
 
 /// Scale frequency values from Hz to kHz
@@ -1529,8 +1483,15 @@ mod mel_axis_tests {
     /// interior 40 of 42 Slaney mel frequencies from 300 Hz to 6000 Hz.
     #[test]
     fn mel_axis_band_centres() {
+        let audio = sine_wave::<f64>(1000.0, Duration::from_millis(500), sample_rate!(16000), 0.5);
+        let mut params = SpectrogramPlotParams::mel_db();
         let mel = MelParams::new(crate::nzu!(40), 300.0, 6000.0).unwrap();
-        let centres = slaney_mel_band_centres(&mel);
+        if let SpectrogramType::MelDb { mel_params, .. } = &mut params.spectrogram_type {
+            *mel_params = mel;
+        } else {
+            panic!("mel_db preset is not a mel dB spectrogram");
+        }
+        let centres = compute_spectrogram_data(&audio, &params).unwrap().freq_axis;
         assert_eq!(centres.len(), 40);
         for (got, want) in [
             (centres[0], 359.449_239_257_6),
