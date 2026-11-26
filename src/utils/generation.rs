@@ -1820,7 +1820,7 @@ mod tests {
     /// Every generator, at 8 kHz, as a function of the duration.
     fn generators() -> Vec<Generator> {
         let sr = sample_rate!(8000);
-        let mut table: Vec<Generator> = vec![
+        let table: Vec<Generator> = vec![
             ("sine_wave", |d| {
                 sine_wave(440.0, d, sample_rate!(8000), 0.5)
             }),
@@ -1878,39 +1878,47 @@ mod tests {
             ("silence", |d| silence(d, sample_rate!(8000))),
         ];
         #[cfg(feature = "random-generation")]
-        table.extend::<[Generator; 4]>([
-            ("white_noise", |d| {
-                white_noise(d, sample_rate!(8000), 0.5, Some(1))
-            }),
-            ("pink_noise", |d| {
-                pink_noise(d, sample_rate!(8000), 0.5, Some(1))
-            }),
-            ("brown_noise", |d| {
-                brown_noise(d, sample_rate!(8000), 0.1, 0.5, Some(1))
-            }),
-            ("exponential_bursts", |d| {
-                exponential_bursts(2.0, 30.0, d, sample_rate!(8000), 0.5)
-            }),
-        ]);
+        let table = {
+            let mut table = table;
+            table.extend::<[Generator; 4]>([
+                ("white_noise", |d| {
+                    white_noise(d, sample_rate!(8000), 0.5, Some(1))
+                }),
+                ("pink_noise", |d| {
+                    pink_noise(d, sample_rate!(8000), 0.5, Some(1))
+                }),
+                ("brown_noise", |d| {
+                    brown_noise(d, sample_rate!(8000), 0.1, 0.5, Some(1))
+                }),
+                ("exponential_bursts", |d| {
+                    exponential_bursts(2.0, 30.0, d, sample_rate!(8000), 0.5)
+                }),
+            ]);
+            table
+        };
         #[cfg(feature = "channels")]
-        table.extend::<[Generator; 4]>([
-            ("stereo_sine_wave", |d| {
-                stereo_sine_wave(440.0, d, sample_rate!(8000), 0.5)
-            }),
-            ("stereo_chirp", |d| {
-                stereo_chirp(100.0, 2000.0, d, sample_rate!(8000), 0.5)
-            }),
-            ("stereo_silence", |d| stereo_silence(d, sample_rate!(8000))),
-            ("multichannel_compound_tone", |d| {
-                let components = [ToneComponent::new(440.0, 1.0)];
-                multichannel_compound_tone(
-                    NonEmptySlice::new(&components).unwrap(),
-                    d,
-                    sample_rate!(8000),
-                    crate::nzu!(3),
-                )
-            }),
-        ]);
+        let table = {
+            let mut table = table;
+            table.extend::<[Generator; 4]>([
+                ("stereo_sine_wave", |d| {
+                    stereo_sine_wave(440.0, d, sample_rate!(8000), 0.5)
+                }),
+                ("stereo_chirp", |d| {
+                    stereo_chirp(100.0, 2000.0, d, sample_rate!(8000), 0.5)
+                }),
+                ("stereo_silence", |d| stereo_silence(d, sample_rate!(8000))),
+                ("multichannel_compound_tone", |d| {
+                    let components = [ToneComponent::new(440.0, 1.0)];
+                    multichannel_compound_tone(
+                        NonEmptySlice::new(&components).unwrap(),
+                        d,
+                        sample_rate!(8000),
+                        crate::nzu!(3),
+                    )
+                }),
+            ]);
+            table
+        };
         assert_eq!(sr.get(), 8000);
         table
     }
