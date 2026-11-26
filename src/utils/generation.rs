@@ -17,7 +17,7 @@
 //! assert_eq!(tone.samples_per_channel().get(), 44100);
 //! ```
 
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Duration;
 
 pub use crate::utils::example_clips::{
@@ -184,6 +184,20 @@ where
     }
 }
 
+/// Number of samples a generator produces for `duration` at `sample_rate`:
+/// `floor(duration * sample_rate)`, and at least one, so the generated
+/// [`AudioSamples`] is never empty.
+///
+/// The product is computed exactly in integer nanoseconds, so a duration that is a
+/// whole number of samples (1.001 s at 8 kHz is 8008) is not rounded down by
+/// floating-point error. A count beyond `usize::MAX` saturates.
+#[inline]
+fn sample_count(duration: Duration, sample_rate: NonZeroU32) -> NonZeroUsize {
+    let n = duration.as_nanos() * u128::from(sample_rate.get()) / 1_000_000_000;
+    let n = usize::try_from(n).unwrap_or(usize::MAX);
+    NonZeroUsize::new(n).unwrap_or(NonZeroUsize::MIN)
+}
+
 /// Generates a sine wave with the specified parameters.
 ///
 /// Produces `floor(duration * sample_rate)` samples of `amplitude * sin(2π · frequency · t)`,
@@ -192,7 +206,7 @@ where
 /// # Arguments
 ///
 /// - `frequency` - Frequency of the sine wave in Hz.
-/// - `duration` - Duration of the generated signal.
+/// - `duration` - Duration of the generated signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// - `sample_rate` - Sampling rate in Hz.
 /// - `amplitude` - Peak amplitude. A value of `1.0` reaches the full-scale positive peak.
 ///
@@ -224,7 +238,7 @@ where
     T: StandardSample,
 {
     let sample_rate_f = f64::from(sample_rate.get());
-    let num_samples = (duration.as_secs_f64() * sample_rate_f) as usize;
+    let num_samples = sample_count(duration, sample_rate).get();
     let two = 2.0;
     let pi = f64::PI();
     let two_pi_frrq = two * pi * frequency;
@@ -237,7 +251,7 @@ where
     });
 
     let array = Array1::from_vec(samples);
-    // safety: we just created the data so is non-empty
+    // SAFETY: `sample_count` is at least one, so the array is non-empty.
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
@@ -310,7 +324,7 @@ fn sine_samples_portable<T: StandardSample>(
 /// # Arguments
 ///
 /// - `frequency` - Frequency of the cosine wave in Hz.
-/// - `duration` - Duration of the generated signal.
+/// - `duration` - Duration of the generated signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// - `sample_rate` - Sampling rate in Hz.
 /// - `amplitude` - Peak amplitude.
 ///
@@ -340,7 +354,7 @@ where
     T: StandardSample,
 {
     let sample_rate_f = f64::from(sample_rate.get());
-    let num_samples = (duration.as_secs_f64() * sample_rate_f) as usize;
+    let num_samples = sample_count(duration, sample_rate).get();
     let mut samples = Vec::with_capacity(num_samples);
     let pi = f64::PI();
     let two_pi_freq = 2.0 * pi * frequency;
@@ -351,7 +365,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    // safety: we just created the data so is non-empty
+    // SAFETY: `sample_count` is at least one, so the array is non-empty.
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
@@ -364,7 +378,7 @@ where
 ///
 /// # Arguments
 ///
-/// - `duration` - Duration of the generated signal.
+/// - `duration` - Duration of the generated signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// - `sample_rate` - Sampling rate in Hz.
 /// - `step` - Step size of the Brownian walk. Larger values produce rougher, more volatile
 ///   noise; smaller values produce smoother, more slowly drifting noise. A value around
@@ -403,7 +417,7 @@ pub fn brown_noise<T>(
 where
     T: StandardSample,
 {
-    let num_samples = (duration.as_secs_f64() * f64::from(sample_rate.get())) as usize;
+    let num_samples = sample_count(duration, sample_rate).get();
     let mut samples = Vec::with_capacity(num_samples);
     let mut brown_state = 0.0f64;
 
@@ -433,7 +447,7 @@ where
     }
 
     let arr = Array1::from_vec(samples);
-    // safety: we just created the data so is non-empty
+    // SAFETY: `sample_count` is at least one, so the array is non-empty.
     unsafe { AudioSamples::new_mono_unchecked(arr, sample_rate) }
 }
 
@@ -445,7 +459,7 @@ where
 ///
 /// # Arguments
 ///
-/// - `duration` - Duration of the generated signal.
+/// - `duration` - Duration of the generated signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// - `sample_rate` - Sampling rate in Hz.
 /// - `amplitude` - Peak amplitude of the noise envelope (0.0 to 1.0). The
 ///   samples are uniform in `[−amplitude, amplitude)`, so the RMS level is
@@ -480,7 +494,7 @@ where
 {
     use rand::rngs::StdRng;
     use rand::{RngExt, SeedableRng};
-    let num_samples = ((duration.as_secs_f64()) * f64::from(sample_rate.get())) as usize;
+    let num_samples = sample_count(duration, sample_rate).get();
     let mut samples = Vec::with_capacity(num_samples);
 
     let two = 2.0;
@@ -504,7 +518,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    // safety: we just created the data so is non-empty
+    // SAFETY: `sample_count` is at least one, so the array is non-empty.
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
@@ -545,7 +559,7 @@ impl KellettPinkFilter {
 ///
 /// # Arguments
 ///
-/// - `duration` - Duration of the generated signal.
+/// - `duration` - Duration of the generated signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// - `sample_rate` - Sampling rate in Hz.
 /// - `amplitude` - Overall amplitude scale applied to each output sample.
 /// - `seed` - Optional RNG seed for reproducibility. Pass `None` for non-deterministic output.
@@ -578,7 +592,7 @@ where
 {
     use rand::rngs::StdRng;
     use rand::{RngExt, SeedableRng};
-    let num_samples = ((duration.as_secs_f64()) * f64::from(sample_rate.get())) as usize;
+    let num_samples = sample_count(duration, sample_rate).get();
     let mut samples = Vec::with_capacity(num_samples);
 
     // Pink noise generation using Paul Kellett's method
@@ -602,7 +616,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    // safety: we just created the data so is non-empty
+    // SAFETY: `sample_count` is at least one, so the array is non-empty.
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
@@ -615,7 +629,7 @@ where
 /// # Arguments
 ///
 /// - `frequency` - Frequency of the square wave in Hz.
-/// - `duration` - Duration of the generated signal.
+/// - `duration` - Duration of the generated signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// - `sample_rate` - Sampling rate in Hz.
 /// - `amplitude` - Peak amplitude.
 ///
@@ -644,7 +658,7 @@ pub fn square_wave<T>(
 where
     T: StandardSample,
 {
-    let num_samples = ((duration.as_secs_f64()) * f64::from(sample_rate.get())) as usize;
+    let num_samples = sample_count(duration, sample_rate).get();
     let mut samples = Vec::with_capacity(num_samples);
 
     let two_pi = 2.0 * std::f64::consts::PI;
@@ -665,7 +679,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    // safety: we just created the data so is non-empty
+    // SAFETY: `sample_count` is at least one, so the array is non-empty.
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
@@ -678,7 +692,7 @@ where
 /// # Arguments
 ///
 /// - `frequency` - Frequency of the sawtooth wave in Hz.
-/// - `duration` - Duration of the generated signal.
+/// - `duration` - Duration of the generated signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// - `sample_rate` - Sampling rate in Hz.
 /// - `amplitude` - Peak amplitude.
 ///
@@ -709,7 +723,7 @@ where
 {
     let sr_f = f64::from(sample_rate.get());
 
-    let num_samples = (duration.as_secs_f64() * sr_f) as usize;
+    let num_samples = sample_count(duration, sample_rate).get();
     let mut samples = Vec::with_capacity(num_samples);
 
     let two_pi = 2.0 * std::f64::consts::PI;
@@ -728,7 +742,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    // safety: we just created the data so is non-empty
+    // SAFETY: `sample_count` is at least one, so the array is non-empty.
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
@@ -741,7 +755,7 @@ where
 /// # Arguments
 ///
 /// - `frequency` - Frequency of the triangle wave in Hz.
-/// - `duration` - Duration of the generated signal.
+/// - `duration` - Duration of the generated signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// - `sample_rate` - Sampling rate in Hz.
 /// - `amplitude` - Peak amplitude.
 ///
@@ -773,7 +787,7 @@ where
     let sr_f = f64::from(sample_rate.get());
     let freq_f = frequency;
 
-    let num_samples = (duration.as_secs_f64() * sr_f) as usize;
+    let num_samples = sample_count(duration, sample_rate).get();
     let mut samples = Vec::with_capacity(num_samples);
 
     let mut phase = 0.0;
@@ -798,7 +812,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    // safety: we just created the data so is non-empty
+    // SAFETY: `sample_count` is at least one, so the array is non-empty.
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
@@ -812,7 +826,7 @@ where
 ///
 /// - `start_freq` - Starting frequency in Hz.
 /// - `end_freq` - Ending frequency in Hz.
-/// - `duration` - Duration of the generated signal.
+/// - `duration` - Duration of the generated signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// - `sample_rate` - Sampling rate in Hz.
 /// - `amplitude` - Peak amplitude.
 ///
@@ -842,13 +856,19 @@ pub fn chirp<T>(
 where
     T: StandardSample,
 {
-    let num_samples = ((duration.as_secs_f64()) * f64::from(sample_rate.get())) as usize;
+    let num_samples = sample_count(duration, sample_rate).get();
 
     let sr_f = f64::from(sample_rate.get());
     let f0 = start_freq;
     let f1 = end_freq;
     let duration_f = duration.as_secs_f64();
-    let k = (f1 - f0) / duration_f; // linear frequency slope
+    // Linear frequency slope. A zero duration gives one sample, at t = 0, where the
+    // slope does not matter.
+    let k = if duration_f > 0.0 {
+        (f1 - f0) / duration_f
+    } else {
+        0.0
+    };
 
     let two_pi = 2.0 * f64::PI();
 
@@ -861,7 +881,7 @@ where
     });
 
     let array = Array1::from_vec(samples);
-    // safety: we just created the data so is non-empty
+    // SAFETY: `sample_count` is at least one, so the array is non-empty.
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
@@ -879,7 +899,7 @@ where
 ///
 /// - `start_freq` - Starting frequency in Hz. Must be `> 0`.
 /// - `end_freq` - Ending frequency in Hz. Must be `> 0`.
-/// - `duration` - Duration of the generated signal.
+/// - `duration` - Duration of the generated signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// - `sample_rate` - Sampling rate in Hz.
 /// - `amplitude` - Peak amplitude.
 ///
@@ -919,13 +939,18 @@ where
     );
 
     let sr_f = f64::from(sample_rate.get());
-    let num_samples = (duration.as_secs_f64() * sr_f) as usize;
+    let num_samples = sample_count(duration, sample_rate).get();
 
     let duration_f = duration.as_secs_f64();
     let two_pi = 2.0 * f64::PI();
-    // k is the per-second geometric frequency growth factor.
-    let k = (end_freq / start_freq).powf(1.0 / duration_f);
-    let ln_k = k.ln();
+    // ln k, where k is the per-second geometric frequency growth factor. k itself
+    // overflows for short wide sweeps, so k^t is computed as exp(t ln k). A zero
+    // duration gives one sample, at t = 0, which the pure-tone branch handles.
+    let ln_k = if duration_f > 0.0 {
+        (end_freq / start_freq).ln() / duration_f
+    } else {
+        0.0
+    };
 
     let samples: Vec<T> = sine_samples(num_samples, amplitude, |start, phases| {
         if ln_k == 0.0 {
@@ -942,7 +967,7 @@ where
         // k^(t - t0) - 1 = expm1((t - t0) ln k) from its series, which
         // vectorises; the series is used while |(t - t0) ln k| <= 1/16.
         let t0 = start as f64 / sr_f;
-        let a = k.powf(t0);
+        let a = (t0 * ln_k).exp();
         for (j, p) in phases.iter_mut().enumerate() {
             *p = (j as f64 / sr_f) * ln_k;
         }
@@ -951,14 +976,14 @@ where
             let kt = if small {
                 a + a * expm1_series(*p)
             } else {
-                k.powf((start + j) as f64 / sr_f)
+                ((start + j) as f64 / sr_f * ln_k).exp()
             };
             *p = two_pi * start_freq * ((kt - 1.0) / ln_k);
         }
     });
 
     let array = Array1::from_vec(samples);
-    // safety: we just created the data so is non-empty
+    // SAFETY: `sample_count` is at least one, so the array is non-empty.
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
@@ -998,7 +1023,7 @@ fn expm1_series(x: f64) -> f64 {
 /// # Arguments
 ///
 /// - `frequency` - Fundamental frequency of the square wave in Hz.
-/// - `duration` - Duration of the generated signal.
+/// - `duration` - Duration of the generated signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// - `sample_rate` - Sampling rate in Hz.
 /// - `amplitude` - Peak amplitude of the underlying ideal square wave.
 ///
@@ -1028,7 +1053,7 @@ where
     T: StandardSample,
 {
     let sr_f = f64::from(sample_rate.get());
-    let num_samples = (duration.as_secs_f64() * sr_f) as usize;
+    let num_samples = sample_count(duration, sample_rate).get();
     let mut samples = Vec::with_capacity(num_samples);
 
     let two_pi = 2.0 * f64::PI();
@@ -1054,7 +1079,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    // safety: we just created the data so is non-empty
+    // SAFETY: `sample_count` is at least one, so the array is non-empty.
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
@@ -1073,7 +1098,7 @@ where
 /// # Arguments
 ///
 /// - `frequency` - Fundamental frequency of the sawtooth wave in Hz.
-/// - `duration` - Duration of the generated signal.
+/// - `duration` - Duration of the generated signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// - `sample_rate` - Sampling rate in Hz.
 /// - `amplitude` - Peak amplitude of the underlying ideal sawtooth wave.
 ///
@@ -1103,7 +1128,7 @@ where
     T: StandardSample,
 {
     let sr_f = f64::from(sample_rate.get());
-    let num_samples = (duration.as_secs_f64() * sr_f) as usize;
+    let num_samples = sample_count(duration, sample_rate).get();
     let mut samples = Vec::with_capacity(num_samples);
 
     let two_pi = 2.0 * f64::PI();
@@ -1131,7 +1156,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    // safety: we just created the data so is non-empty
+    // SAFETY: `sample_count` is at least one, so the array is non-empty.
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
@@ -1150,7 +1175,7 @@ where
 /// # Arguments
 ///
 /// - `frequency` - Fundamental frequency of the triangle wave in Hz.
-/// - `duration` - Duration of the generated signal.
+/// - `duration` - Duration of the generated signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// - `sample_rate` - Sampling rate in Hz.
 /// - `amplitude` - Peak amplitude of the underlying ideal triangle wave.
 ///
@@ -1180,7 +1205,7 @@ where
     T: StandardSample,
 {
     let sr_f = f64::from(sample_rate.get());
-    let num_samples = (duration.as_secs_f64() * sr_f) as usize;
+    let num_samples = sample_count(duration, sample_rate).get();
     let mut samples = Vec::with_capacity(num_samples);
 
     let two_pi = 2.0 * f64::PI();
@@ -1212,7 +1237,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    // safety: we just created the data so is non-empty
+    // SAFETY: `sample_count` is at least one, so the array is non-empty.
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
@@ -1227,7 +1252,7 @@ where
 /// - `carrier_freq` - Carrier frequency in Hz.
 /// - `modulator_freq` - Modulator frequency in Hz.
 /// - `modulation_index` - Modulation index (peak phase deviation in radians).
-/// - `duration` - Duration of the generated signal.
+/// - `duration` - Duration of the generated signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// - `sample_rate` - Sampling rate in Hz.
 /// - `amplitude` - Peak amplitude.
 ///
@@ -1260,7 +1285,7 @@ where
     T: StandardSample,
 {
     let sr_f = f64::from(sample_rate.get());
-    let num_samples = (duration.as_secs_f64() * sr_f) as usize;
+    let num_samples = sample_count(duration, sample_rate).get();
     let mut samples = Vec::with_capacity(num_samples);
 
     let two_pi = 2.0 * f64::PI();
@@ -1276,7 +1301,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    // safety: we just created the data so is non-empty
+    // SAFETY: `sample_count` is at least one, so the array is non-empty.
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
@@ -1287,7 +1312,7 @@ where
 ///
 /// # Arguments
 ///
-/// - `duration` - Duration of the generated signal.
+/// - `duration` - Duration of the generated signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// - `sample_rate` - Sampling rate in Hz.
 /// - `amplitude` - Value of the impulse sample.
 /// - `position` - Time offset of the impulse in seconds.
@@ -1319,7 +1344,7 @@ pub fn impulse<T>(
 where
     T: StandardSample,
 {
-    let num_samples = ((duration.as_secs_f64()) * f64::from(sample_rate.get())) as usize;
+    let num_samples = sample_count(duration, sample_rate).get();
     let mut samples: Vec<T> = vec![0.0.convert_to(); num_samples];
 
     let impulse_sample = (position * f64::from(sample_rate.get())) as usize;
@@ -1328,7 +1353,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    // safety: we just created the data so is non-empty
+    // SAFETY: `sample_count` is at least one, so the array is non-empty.
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 /// A component of a compound tone, specifying frequency and relative amplitude.
@@ -1374,7 +1399,7 @@ impl ToneComponent {
 ///
 /// # Arguments
 /// * `components` - Slice of frequency/amplitude pairs
-/// * `duration` - Duration of the signal
+/// * `duration` - Duration of the signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// * `sample_rate` - Sample rate in Hz
 ///
 /// # Returns
@@ -1411,7 +1436,7 @@ where
     T: StandardSample,
 {
     let sr_f = f64::from(sample_rate.get());
-    let num_samples = ((duration.as_secs_f64()) * sr_f) as usize;
+    let num_samples = sample_count(duration, sample_rate).get();
     let two_pi = 2.0 * f64::PI();
     let mut samples = Vec::with_capacity(num_samples);
 
@@ -1425,7 +1450,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    // safety: we just created the data so is non-empty
+    // SAFETY: `sample_count` is at least one, so the array is non-empty.
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
@@ -1447,17 +1472,12 @@ where
 /// * `modulator_freq` - Frequency `f_m` of the modulating envelope in Hz
 /// * `modulation_depth` - Modulation index `m` (0.0 = no modulation,
 ///   1.0 = 100 % modulation)
-/// * `duration` - Duration of the signal
+/// * `duration` - Duration of the signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// * `sample_rate` - Sample rate in Hz
 /// * `amplitude` - Peak amplitude `A` of the output
 ///
 /// # Returns
 /// An [`AudioSamples`] instance containing the AM signal.
-///
-/// # Panics
-/// - If `sample_rate` is 0.
-/// - If the computed number of samples cannot be represented as `usize`.
-/// - If `duration` results in zero samples.
 ///
 /// # Examples
 ///
@@ -1484,7 +1504,7 @@ where
     T: StandardSample,
 {
     let sr_f = f64::from(sample_rate.get());
-    let num_samples = ((duration.as_secs_f64()) * sr_f) as usize;
+    let num_samples = sample_count(duration, sample_rate).get();
 
     let two_pi = 2.0 * f64::PI();
     let one = 1.0;
@@ -1502,7 +1522,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    // safety: we just created the data so is non-empty
+    // SAFETY: `sample_count` is at least one, so the array is non-empty.
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
@@ -1522,17 +1542,12 @@ where
 ///   `e^(−decay_rate·φ)` with `φ` the elapsed fraction of the period, so the
 ///   decay time constant is `1/(decay_rate·burst_rate)` seconds (higher =
 ///   faster decay)
-/// * `duration` - Duration of the signal
+/// * `duration` - Duration of the signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// * `sample_rate` - Sample rate in Hz
 /// * `amplitude` - Peak amplitude of bursts
 ///
 /// # Returns
 /// An [`AudioSamples`] instance containing the burst signal.
-///
-/// # Panics
-/// - If `sample_rate` is 0.
-/// - If the computed number of samples cannot be represented as `usize`.
-/// - If `duration` results in zero samples.
 ///
 /// # Examples
 ///
@@ -1559,7 +1574,7 @@ where
     T: StandardSample,
 {
     let sr_f = f64::from(sample_rate.get());
-    let num_samples = ((duration.as_secs_f64()) * sr_f) as usize;
+    let num_samples = sample_count(duration, sample_rate).get();
 
     let two_pi = 2.0 * f64::PI();
     let burst_period_threshold = 0.1; // 10% of period is active
@@ -1587,7 +1602,7 @@ where
     }
 
     let array = Array1::from_vec(samples);
-    // safety: we know array is non-empty
+    // SAFETY: `sample_count` is at least one, so the array is non-empty.
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
@@ -1595,14 +1610,12 @@ where
 ///
 /// # Arguments
 ///
-/// - `duration` - Duration of the generated signal.
+/// - `duration` - Duration of the generated signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// - `sample_rate` - Sampling rate in Hz.
 ///
 /// # Returns
 ///
 /// A mono [`AudioSamples`] buffer containing zero-valued samples for the entire duration.
-///
-/// # Panics
 ///
 /// # Examples
 ///
@@ -1621,11 +1634,11 @@ pub fn silence<T>(duration: Duration, sample_rate: NonZeroU32) -> AudioSamples<'
 where
     T: StandardSample,
 {
-    let num_samples = ((duration.as_secs_f64()) * f64::from(sample_rate.get())) as usize;
+    let num_samples = sample_count(duration, sample_rate).get();
     let samples = vec![T::zero(); num_samples];
 
     let array = Array1::from_vec(samples);
-    // safety: we know array is non-empty
+    // SAFETY: `sample_count` is at least one, so the array is non-empty.
     unsafe { AudioSamples::new_mono_unchecked(array, sample_rate) }
 }
 
@@ -1641,15 +1654,12 @@ where
 ///
 /// # Arguments
 /// * `frequency` - Frequency of the sine wave in Hz
-/// * `duration` - Duration of the signal
+/// * `duration` - Duration of the signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// * `sample_rate` - Sample rate in Hz
 /// * `amplitude` - Amplitude of the sine wave (0.0 to 1.0)
 ///
 /// # Returns
 /// A stereo [`AudioSamples`] with the sine wave on both channels.
-///
-/// # Panics
-/// Same as [`sine_wave`].
 ///
 /// # Examples
 ///
@@ -1675,7 +1685,7 @@ where
     use crate::operations::AudioChannelOps;
     let mono = sine_wave::<T>(frequency, duration, sample_rate, amplitude);
     mono.duplicate_to_channels(2)
-        .expect("duplicating mono to stereo should not fail")
+        .expect("two copies of a non-empty mono buffer always stack into stereo")
 }
 
 #[cfg(feature = "channels")]
@@ -1684,16 +1694,13 @@ where
 /// # Arguments
 /// * `start_freq` - Starting frequency in Hz
 /// * `end_freq` - Ending frequency in Hz
-/// * `duration` - Duration of the signal
+/// * `duration` - Duration of the signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// * `sample_rate` - Sample rate in Hz
 /// * `amplitude` - Amplitude of the chirp (0.0 to 1.0)
 ///
 /// # Returns
 /// A stereo [`AudioSamples`] with the chirp on both channels.
 ///
-/// # Panics
-///
-/// If ndarray cannot stack the channels for some reason
 /// # Examples
 ///
 /// ```rust
@@ -1719,22 +1726,18 @@ where
     use crate::operations::AudioChannelOps;
     let mono = chirp::<T>(start_freq, end_freq, duration, sample_rate, amplitude);
     mono.duplicate_to_channels(2)
-        .expect("duplicating mono to stereo should not fail")
+        .expect("two copies of a non-empty mono buffer always stack into stereo")
 }
 
 #[cfg(feature = "channels")]
 /// Generates stereo silence.
 ///
 /// # Arguments
-/// * `duration` - Duration of the signal
+/// * `duration` - Duration of the signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// * `sample_rate` - Sample rate in Hz
 ///
 /// # Returns
 /// A stereo [`AudioSamples`] containing silence on both channels.
-///
-/// # Panics
-///
-/// If ndarray cannot stack the channels for some reason
 ///
 /// # Examples
 ///
@@ -1755,7 +1758,7 @@ where
     use crate::operations::AudioChannelOps;
     let mono = silence::<T>(duration, sample_rate);
     mono.duplicate_to_channels(2)
-        .expect("duplicating mono to stereo should not fail")
+        .expect("two copies of a non-empty mono buffer always stack into stereo")
 }
 
 #[cfg(feature = "channels")]
@@ -1766,7 +1769,7 @@ where
 ///
 /// # Arguments
 /// * `components` - Slice of frequency/amplitude pairs
-/// * `duration` - Duration of the signal
+/// * `duration` - Duration of the signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// * `sample_rate` - Sample rate in Hz
 /// * `n_channels` - Number of output channels
 ///
@@ -1775,8 +1778,7 @@ where
 ///
 /// # Panics
 ///
-/// - If `sample_rate` is 0.
-/// - If the computed number of samples cannot be represented as `usize`.
+/// If `n_channels` is 0.
 ///
 /// # Examples
 ///
@@ -1806,7 +1808,7 @@ where
     use crate::operations::AudioChannelOps;
     let mono = compound_tone::<T>(components, duration, sample_rate);
     mono.duplicate_to_channels(n_channels)
-        .expect("duplicating mono to n_channels should not fail")
+        .expect("n_channels must be at least 1")
 }
 
 #[cfg(test)]
@@ -1816,6 +1818,168 @@ mod tests {
     use crate::operations::traits::AudioStatistics;
     use crate::sample_rate;
     use approx_eq::assert_approx_eq;
+
+    type Generator = (&'static str, fn(Duration) -> AudioSamples<'static, f64>);
+
+    /// Every generator, at 8 kHz, as a function of the duration.
+    fn generators() -> Vec<Generator> {
+        let sr = sample_rate!(8000);
+        let mut table: Vec<Generator> = vec![
+            ("sine_wave", |d| {
+                sine_wave(440.0, d, sample_rate!(8000), 0.5)
+            }),
+            ("cosine_wave", |d| {
+                cosine_wave(440.0, d, sample_rate!(8000), 0.5)
+            }),
+            ("square_wave", |d| {
+                square_wave(440.0, d, sample_rate!(8000), 0.5)
+            }),
+            ("sawtooth_wave", |d| {
+                sawtooth_wave(440.0, d, sample_rate!(8000), 0.5)
+            }),
+            ("triangle_wave", |d| {
+                triangle_wave(440.0, d, sample_rate!(8000), 0.5)
+            }),
+            ("chirp", |d| {
+                chirp(100.0, 2000.0, d, sample_rate!(8000), 0.5)
+            }),
+            ("chirp (constant)", |d| {
+                chirp(300.0, 300.0, d, sample_rate!(8000), 0.5)
+            }),
+            ("exponential_chirp", |d| {
+                exponential_chirp(100.0, 3000.0, d, sample_rate!(8000), 0.5)
+            }),
+            ("exponential_chirp (constant)", |d| {
+                exponential_chirp(300.0, 300.0, d, sample_rate!(8000), 0.5)
+            }),
+            ("square_wave_bandlimited", |d| {
+                square_wave_bandlimited(440.0, d, sample_rate!(8000), 0.5)
+            }),
+            ("sawtooth_wave_bandlimited", |d| {
+                sawtooth_wave_bandlimited(440.0, d, sample_rate!(8000), 0.5)
+            }),
+            ("triangle_wave_bandlimited", |d| {
+                triangle_wave_bandlimited(440.0, d, sample_rate!(8000), 0.5)
+            }),
+            ("fm_signal", |d| {
+                fm_signal(440.0, 5.0, 2.0, d, sample_rate!(8000), 0.5)
+            }),
+            ("am_signal", |d| {
+                am_signal(440.0, 5.0, 0.5, d, sample_rate!(8000), 0.5)
+            }),
+            ("impulse", |d| impulse(d, sample_rate!(8000), 1.0, 0.0)),
+            ("compound_tone", |d| {
+                let components = [
+                    ToneComponent::new(440.0, 1.0),
+                    ToneComponent::new(880.0, 0.5),
+                ];
+                compound_tone(
+                    NonEmptySlice::new(&components).unwrap(),
+                    d,
+                    sample_rate!(8000),
+                )
+            }),
+            ("silence", |d| silence(d, sample_rate!(8000))),
+        ];
+        #[cfg(feature = "random-generation")]
+        table.extend::<[Generator; 4]>([
+            ("white_noise", |d| {
+                white_noise(d, sample_rate!(8000), 0.5, Some(1))
+            }),
+            ("pink_noise", |d| {
+                pink_noise(d, sample_rate!(8000), 0.5, Some(1))
+            }),
+            ("brown_noise", |d| {
+                brown_noise(d, sample_rate!(8000), 0.1, 0.5, Some(1))
+            }),
+            ("exponential_bursts", |d| {
+                exponential_bursts(2.0, 30.0, d, sample_rate!(8000), 0.5)
+            }),
+        ]);
+        #[cfg(feature = "channels")]
+        table.extend::<[Generator; 4]>([
+            ("stereo_sine_wave", |d| {
+                stereo_sine_wave(440.0, d, sample_rate!(8000), 0.5)
+            }),
+            ("stereo_chirp", |d| {
+                stereo_chirp(100.0, 2000.0, d, sample_rate!(8000), 0.5)
+            }),
+            ("stereo_silence", |d| stereo_silence(d, sample_rate!(8000))),
+            ("multichannel_compound_tone", |d| {
+                let components = [ToneComponent::new(440.0, 1.0)];
+                multichannel_compound_tone(
+                    NonEmptySlice::new(&components).unwrap(),
+                    d,
+                    sample_rate!(8000),
+                    3,
+                )
+            }),
+        ]);
+        assert_eq!(sr.get(), 8000);
+        table
+    }
+
+    fn assert_frames(name: &str, audio: &AudioSamples<'static, f64>, frames: usize) {
+        assert_eq!(audio.samples_per_channel().get(), frames, "{name}");
+        assert_eq!(
+            audio.len().get(),
+            frames * audio.num_channels().get() as usize,
+            "{name}"
+        );
+        assert!(
+            audio.to_interleaved_vec().iter().all(|x| x.is_finite()),
+            "{name} has non-finite samples"
+        );
+    }
+
+    #[test]
+    fn a_duration_shorter_than_one_sample_gives_one_sample() {
+        // One sample at 8 kHz lasts 125 us.
+        for duration in [
+            Duration::ZERO,
+            Duration::from_nanos(1),
+            Duration::from_micros(124),
+        ] {
+            for (name, generate) in generators() {
+                assert_frames(name, &generate(duration), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn longer_durations_give_floor_of_duration_times_rate() {
+        for (duration, frames) in [
+            (Duration::from_micros(125), 1),
+            (Duration::from_micros(374), 2),
+            (Duration::from_millis(100), 800),
+            (Duration::from_millis(1001), 8008),
+        ] {
+            for (name, generate) in generators() {
+                assert_frames(name, &generate(duration), frames);
+            }
+        }
+    }
+
+    #[test]
+    fn exponential_chirp_of_a_short_sweep_is_finite() {
+        // A wide sweep over a few milliseconds: the per-second growth factor
+        // (f1 / f0)^(1 / duration) overflows f64.
+        for ms in [1, 5, 20] {
+            let sweep = exponential_chirp::<f64>(
+                20.0,
+                20_000.0,
+                Duration::from_millis(ms),
+                sample_rate!(48000),
+                1.0,
+            );
+            let mono = sweep.as_mono().unwrap();
+            assert!(
+                mono.iter().all(|x| x.is_finite() && x.abs() <= 1.0),
+                "{ms} ms"
+            );
+            assert_eq!(mono[0], 0.0);
+        }
+    }
 
     #[test]
     fn test_sine_wave_generation() {

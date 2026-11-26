@@ -401,6 +401,18 @@ The librosa-compatible API is unreleased, so these are changes to the
 
 ### Fixed
 
+- **Signal generators never return empty audio.** `sine_wave`, `cosine_wave`, the square,
+  sawtooth and triangle waves (plain and band-limited), `chirp`, `exponential_chirp`,
+  `fm_signal`, `am_signal`, `impulse`, `compound_tone`, `silence`, the noise generators,
+  `exponential_bursts` and the stereo and multi-channel wrappers produced an empty, invalid
+  `AudioSamples` for `Duration::ZERO` or any duration shorter than one sample: debug builds
+  panicked on first use and release builds had undefined behaviour. A duration shorter than
+  one sample now gives one sample. The sample count is `floor(duration * sample_rate)`
+  computed exactly; it was computed in `f64`, which gave one sample fewer when the product
+  rounded just below a whole number (1.001 s at 8 kHz gave 8007 samples, now 8008).
+  `exponential_chirp` no longer returns NaN for a short, wide sweep (20 Hz to 20 kHz over
+  1 ms overflowed its per-second growth factor), and `chirp` no longer returns NaN for a
+  zero duration.
 - **`BandLayout::erb` spaces its bands evenly on the ERB-number scale.** It spaced them evenly
   in the ERB *bandwidth* (`hz_to_erb`), which is affine in Hz, so every band had the same
   width in Hz. The band edges are now equal steps of E(f) = 21.4·log10(1 + 0.00437 f) Cam
