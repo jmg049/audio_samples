@@ -39,10 +39,6 @@
 
 pub mod perceptual;
 
-/// Opus-inspired teaching codec (not bitstream compatible with Opus): SILK-style (speech),
-/// CELT-style (music) and Hybrid modes.
-///
-/// Requires the `opus-codec` feature flag.
 #[cfg(feature = "opus-codec")]
 pub mod opus;
 

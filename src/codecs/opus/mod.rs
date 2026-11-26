@@ -6,14 +6,14 @@
 //! codec and is not bitstream compatible with Opus:** there is no range coder, no
 //! LSF/NLSF quantisation, no PVQ or band-energy coding as in CELT, and no noise
 //! shaping. Its CELT mode is a generic perceptual MDCT codec, and its mode decision
-//! is a simple heuristic ([`detect_mode`](crate::codecs::opus::mode::detect_mode)).
+//! is a simple heuristic ([`detect_mode`]).
 //! Use it to study the structure of a hybrid speech and music codec, not to
 //! produce or decode `.opus` data.
 //!
-//! [`OpusCodec`](crate::codecs::opus::OpusCodec) cuts mono audio into fixed-length
+//! [`OpusCodec`] cuts mono audio into fixed-length
 //! frames and codes each with the mode set in
-//! [`OpusConfig`](crate::codecs::opus::OpusConfig), or the one detected per frame;
-//! [`OpusStereoCodec`](crate::codecs::opus::OpusStereoCodec) codes two channels as
+//! [`OpusConfig`], or the one detected per frame;
+//! [`OpusStereoCodec`] codes two channels as
 //! mid and side. Encoded audio is an in-memory structure.
 //!
 //! ```rust
@@ -35,15 +35,15 @@
 //! ## How it works
 //!
 //! - **CELT mode** runs the perceptual pipeline per frame: MDCT, psychoacoustic
-//!   masking, bit allocation, scalar quantisation ([`celt`](crate::codecs::opus::celt)).
+//!   masking, bit allocation, scalar quantisation ([`celt`]).
 //! - **SILK mode** predicts each sample from the previous ones with LPC
-//!   ([`lpc`](crate::codecs::opus::lpc)), removes the pitch periodicity with a
+//!   ([`lpc`]), removes the pitch periodicity with a
 //!   single-tap long-term predictor (LTP) and quantises the residual
-//!   ([`silk`](crate::codecs::opus::silk)).
+//!   ([`silk`]).
 //! - **Hybrid mode** splits the signal at 8 kHz with a first-order IIR crossover
 //!   whose two bands sum back to the input exactly, codes the low band with SILK and
 //!   the high band with CELT, and sums them on decode
-//!   ([`hybrid`](crate::codecs::opus::hybrid)).
+//!   ([`hybrid`]).
 //!
 //! ## Limitations
 //!
