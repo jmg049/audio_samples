@@ -1771,27 +1771,23 @@ where
 /// * `components` - Slice of frequency/amplitude pairs
 /// * `duration` - Duration of the signal. A duration shorter than one sample gives one sample; `AudioSamples` is never empty.
 /// * `sample_rate` - Sample rate in Hz
-/// * `n_channels` - Number of output channels
+/// * `n_channels` - Number of output channels, at least one
 ///
 /// # Returns
 /// A multi-channel [`AudioSamples`] with identical content on all channels.
-///
-/// # Panics
-///
-/// If `n_channels` is 0.
 ///
 /// # Examples
 ///
 /// ```rust
 /// use audio_samples::utils::generation::{multichannel_compound_tone, ToneComponent};
-/// use audio_samples::sample_rate;
+/// use audio_samples::{nzu, sample_rate};
 /// use non_empty_slice::NonEmptySlice;
 /// use std::time::Duration;
 ///
 /// let raw = [ToneComponent::new(440.0, 1.0), ToneComponent::new(880.0, 0.5)];
 /// let components = NonEmptySlice::from_slice(&raw).unwrap();
 /// // 5.1 surround sound test tone.
-/// let surround = multichannel_compound_tone::<f64>(components, Duration::from_secs(1), sample_rate!(44100), 6);
+/// let surround = multichannel_compound_tone::<f64>(components, Duration::from_secs(1), sample_rate!(44100), nzu!(6));
 /// assert_eq!(surround.num_channels().get(), 6);
 /// ```
 #[inline]
@@ -1800,15 +1796,15 @@ pub fn multichannel_compound_tone<T>(
     components: &NonEmptySlice<ToneComponent>,
     duration: Duration,
     sample_rate: NonZeroU32,
-    n_channels: usize,
+    n_channels: NonZeroUsize,
 ) -> AudioSamples<'static, T>
 where
     T: StandardSample,
 {
     use crate::operations::AudioChannelOps;
     let mono = compound_tone::<T>(components, duration, sample_rate);
-    mono.duplicate_to_channels(n_channels)
-        .expect("n_channels must be at least 1")
+    mono.duplicate_to_channels(n_channels.get())
+        .expect("copies of a non-empty mono buffer always stack")
 }
 
 #[cfg(test)]
@@ -1911,7 +1907,7 @@ mod tests {
                     NonEmptySlice::new(&components).unwrap(),
                     d,
                     sample_rate!(8000),
-                    3,
+                    crate::nzu!(3),
                 )
             }),
         ]);
@@ -2551,7 +2547,7 @@ mod tests {
             components,
             Duration::from_secs_f32(0.1),
             sample_rate!(44100),
-            6, // 5.1 surround
+            crate::nzu!(6), // 5.1 surround
         );
 
         assert_eq!(audio.sample_rate(), sample_rate!(44100));

@@ -642,6 +642,8 @@ odd-length spectral bin spacing, `frequency_to_note` and
   error, with the buffer reset to two channels of zeros, if it left anything other than
   stereo audio (a length change is allowed). `samples` borrows and `into_inner` returns the
   `AudioSamples`, replacing `stereo.0`.
+- **`multichannel_compound_tone` takes `n_channels: NonZeroUsize`** (was `usize`, and 0
+  panicked).
 - **Onset peak-picking presets are specified in seconds and take the sample rate.**
   `PeakPickingConfig::music`, `speech` and `drums` used lengths sized as audio samples (a
   2048-frame threshold window and a 1024-frame separation for `music`), which on an onset
