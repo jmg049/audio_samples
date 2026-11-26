@@ -121,7 +121,7 @@ open = { version = "5.3.6", optional = true }
 rustfft = { version = "6.2", optional = true }
 realfft = { version = "3.5", optional = true }
 non-empty-slice = "0.6"
-non-empty-iter = "0.3.1"
+non-empty-iter = "0.4.0"
 audioadapter = { version = "5.0.0", optional = true }
 
 [features]
