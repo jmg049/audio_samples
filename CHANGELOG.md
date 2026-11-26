@@ -425,6 +425,20 @@ The librosa-compatible API is unreleased, so these are changes to the
   layout. Encoded audio is an in-memory structure with no serialised format, so no stored
   data is affected. New `hz_to_erb_number` and
   `erb_number_to_hz` in `codecs::perceptual::bands` convert between Hz and the ERB number.
+- **`BandLayout::bark`, `BandLayout::mel` and `BandLayout::celt` tile the bins `0..n_bins`.**
+  Each band's edges were rounded to bins on their own, so the layouts could leave bins out
+  and, when `n_bins` was small, give overlapping bands. `bark` and `mel` left out the top
+  bin (their last band ended at `n_bins - 1`), and `bark` also left out the bins below
+  0 Bark (about 39.5 Hz, bins 0 to 6 of 4096 at 44.1 kHz). `celt` left out the bins above
+  the table's last edge, 20 kHz, when Nyquist was above it (161 of 960 bins at 48 kHz), and
+  gave overlapping bands at small `n_bins`. All three now build their bands as
+  `BandLayout::erb` does: the first band starts at bin 0, the last ends at `n_bins`, the
+  bands do not overlap, and a band that would hold no bin is merged into the band above
+  it, so `bark` and `mel` can have fewer than `n_bands` bands and `celt` fewer than its
+  table gives. Each scale's spacing is unchanged: the interior edges, centre frequencies and
+  perceptual positions of bands that are not merged are the same as before. The outer
+  bands of a layout gain the bins that were left out, which changes the output of a codec
+  or analysis using these layouts (including `OpusCodec`, whose default layout is `celt`).
 - **The links between the two librosa migration documents work on docs.rs.** The
   `librosa_migration` and `moving_from_librosa_rust` pages linked to each other by file name,
   which only works on GitHub; the rendered pages now link to each other's module.
