@@ -85,7 +85,7 @@ serde_json = "1.0"
 ndarray = "0.17"
 num-complex = "0.4"
 spectrograms = "2.2.1"
-non-empty-slice = "0.6"
+non-empty-slice = "0.7"
 
 [profile.release]
 debug = false
