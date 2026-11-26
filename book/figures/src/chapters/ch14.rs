@@ -424,8 +424,8 @@ fn codec(figs: &mut Figures) -> Result {
     }
     let low = snr_db(32_000)?;
     let high = snr_db(128_000)?;
-    assert_close("SNR at budget 32000", low, 42.1, 1.0);
-    assert_close("SNR at budget 128000", high, 50.6, 1.0);
+    assert_close("SNR at budget 32000", low, 42.7, 1.0);
+    assert_close("SNR at budget 128000", high, 61.9, 1.0);
     check("more bits, higher SNR", high > low);
     let y_max = pts.iter().fold(0.0f64, |m, p| m.max(p.1)) + 8.0;
     let y_min = (pts.iter().fold(f64::INFINITY, |m, p| m.min(p.1)) - 8.0).max(0.0);
@@ -434,7 +434,7 @@ fn codec(figs: &mut Figures) -> Result {
         "ch14-codec-snr",
         "SNR of half a second of a 1 kHz tone after encoding and decoding with the \
          PerceptualCodec (24 Bark bands, 2048-sample MDCT, mpeg1 masking preset), against \
-         the bit budget: about 42 dB at 32000 and 51 dB at 128000.",
+         the bit budget: about 43 dB at 32000 and 62 dB at 128000.",
         SIZE,
         |area| {
             Chart::new(

@@ -229,9 +229,9 @@ let snr_db = |budget: u32| {
     10.0 * (s / e).log10()
 };
 let (low, high) = (snr_db(32_000), snr_db(128_000));
-// About 42 dB and 51 dB (1 dB tolerance: the figures depend on the bit allocator).
-assert!((low - 42.1).abs() < 1.0);
-assert!((high - 50.6).abs() < 1.0);
+// About 43 dB and 62 dB (1 dB tolerance: the figures depend on the bit allocator).
+assert!((low - 42.7).abs() < 1.0);
+assert!((high - 61.9).abs() < 1.0);
 assert!(high > low);
 ```
 

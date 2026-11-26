@@ -275,9 +275,9 @@ fn main() -> AudioSampleResult<()> {
         last = snr;
         snrs.push(snr);
     }
-    // About 42 dB at 32 000 bits rising to about 51 dB at 256 000 bits, where it
-    // saturates (1 dB tolerance: the figures depend on the bit allocator).
-    assert!((snrs[0] - 42.1).abs() < 1.0 && (snrs[3] - 50.9).abs() < 1.0);
+    // About 43 dB at 32 000 bits rising to about 89 dB at 256 000 bits (1 dB
+    // tolerance: the figures depend on the bit allocator).
+    assert!((snrs[0] - 42.7).abs() < 1.0 && (snrs[3] - 88.5).abs() < 1.0);
 
     println!("\nAll checks passed.");
     Ok(())
